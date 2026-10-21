@@ -1,0 +1,12 @@
+{
+  "name": "oralink-sendzen-gateway",
+  "version": "0.0.1",
+  "private": true,
+  "description": "PROTOTYPE — stateless Graph-compatible gateway between waCRM and the SendZen API. Zero dependencies.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}
