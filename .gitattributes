@@ -1,0 +1,4 @@
+# Shell scripts and SQL must keep LF line endings on every platform:
+# with core.autocrlf=true (Windows), CRLF breaks bash (supabase/tests/run.sh) in Linux containers.
+*.sh  text eol=lf
+*.sql text eol=lf
