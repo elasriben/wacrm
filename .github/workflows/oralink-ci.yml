@@ -1,0 +1,108 @@
+name: OraLink CI
+
+# Runs on the fork's working branches only. main keeps the upstream ci.yml /
+# migrations.yml workflows; nothing here triggers on main.
+on:
+  push:
+    branches: ['sync/**', 'exp/**', 'ci/**']
+  pull_request:
+    branches: ['sync/**', 'exp/**', 'ci/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oralink-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: Typecheck, lint, unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Same non-secret placeholders as the upstream ci.yml: they satisfy
+    # module-load reads in lib/whatsapp/* and never reach a real service.
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: https://ci.example.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-dummy-anon-key
+      ENCRYPTION_KEY: '0000000000000000000000000000000000000000000000000000000000000000'
+      META_APP_SECRET: 'ci-dummy-meta-secret'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      # --ignore-scripts: no dependency install hooks run on the runner.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      # One suite, one job: src/app/api/ai/usage/route.test.ts times out
+      # (5000 ms) when several suites compete for the same CPU.
+      - name: Unit tests
+        run: npm test
+
+  isolation:
+    name: Supabase isolation suite (71 checks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # Throwaway database on the runner's loopback: no password to keep.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGUSER: postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Tool versions
+        run: psql --version && perl -v | sed -n 2p
+
+      # run.sh exits 0 only on "SUMMARY pass=N fail=0"; the extra check pins N.
+      - name: Run supabase/tests/run.sh
+        run: |
+          bash supabase/tests/run.sh | tee isolation.log
+          grep -qx '== SUMMARY pass=71 fail=0' isolation.log
+
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Scans every commit this branch adds on top of the fork's main.
+      # Image pinned by digest (gitleaks v8.30.1); no license or token needed.
+      - name: gitleaks
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
+            ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            git /repo --log-opts="origin/main..HEAD" --redact --no-banner --exit-code 1
