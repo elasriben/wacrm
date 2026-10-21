@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { checkSignatures, extractEvents, summarize, hmacHex } from '../analyze.mjs'
 import { CASES, assertSafeToSend, LIMITS } from '../payloads.mjs'
 
@@ -55,7 +56,7 @@ test('send guards: refuse production numbers, unlisted recipients, missing allow
 })
 
 const run = (script, args, env = {}) => new Promise((resolve) => {
-  const p = spawn('node', [new URL(`../${script}`, import.meta.url).pathname, ...args], { env: { PATH: process.env.PATH, ...env } })
+  const p = spawn('node', [fileURLToPath(new URL(`../${script}`, import.meta.url)), ...args], { env: { PATH: process.env.PATH, ...env } })
   let out = '', err = ''; p.stdout.on('data', (d) => (out += d)); p.stderr.on('data', (d) => (err += d))
   p.on('close', (code) => resolve({ code, out, err }))
 })
