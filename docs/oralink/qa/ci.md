@@ -30,3 +30,23 @@ Renommer un job casse le check obligatoire correspondant : tout renommage passe 
 - Isolation : `supabase/tests/run.sh --docker`, ou dans `postgres:17` (voir `supabase/tests/README.md`).
 - Application : `node:22`, `npm ci --ignore-scripts && npm run typecheck && npm run lint && npm test`.
   Sur une machine lente/chargée, `src/app/api/ai/usage/route.test.ts` (« flags truncation… ») peut dépasser 5 s.
+
+## Proposition (non branchée) : contrôle PostgREST réel, OL-11
+`supabase/tests/postgrest/run-postgrest-check.sh` démarre `postgres:17` et PostgREST v12.2.12 (épinglés par digest,
+conteneurs `--rm` nommés `oralink-qa-pgrst-*`), rejoue les migrations via `run.sh`, crée deux comptes fictifs et
+interroge l'API en HTTP avec un jeton `service_role` factice. Il prouve que la lecture
+`select=id,broadcasts!inner(account_id)&broadcasts.account_id=eq.<compte>` puis le `PATCH ?id=in.(…)&status=in.(…)`
+ne touchent que le compte résolu, ne changent rien si le statut a bougé entre-temps, et que les témoins négatifs
+(requête actuelle sans filtre de compte ; embarquement sans `!inner`) atteignent bien la ligne de l'autre compte.
+Il vérifie aussi que l'index unique `idx_broadcast_recipients_wamid` empêche le même `wamid` dans deux comptes, puis rejoue
+le cas « même wamid dans A et B » sur un schéma hypothétique sans cet index. Sortie `CHECK … OK|FAIL`, `SUMMARY ok= fail=`, codes 0/1/2.
+
+Intégration possible, au choix de la mainteneuse :
+- **Job facultatif** `OraLink / postgrest checks (optional)` (non exigé par le ruleset) : environ 1 min 20 en local,
+  dont environ 50 s pour le rejeu des migrations (fait une deuxième fois, en plus du job d'isolation). Coût supplémentaire :
+  le téléchargement de l'image PostgREST (environ 5 Mo), environ 1 Go de mémoire, aucun secret.
+- **Intégration au job d'isolation** : réutiliser la base déjà migrée évite le second rejeu (+20 à 30 s), mais rend
+  le check obligatoire dépendant d'une image de plus. À faire seulement une fois le correctif OL-11 fusionné, sinon
+  rien ne bloque une régression.
+Dans les deux cas, ce test vérifie le **comportement de PostgREST** pour les requêtes prévues, pas le code TypeScript :
+seuls les tests unitaires de CRM vérifient que `applyBroadcastRecipientStatus` envoie bien ces requêtes.
