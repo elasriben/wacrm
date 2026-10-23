@@ -30,12 +30,12 @@ Intégration dans `main` par PR distinctes, dans cet ordre (une PR n'est fusionn
 
 Protection de `main` (ruleset GitHub, **décision humaine : ne pas modifier**) : PR obligatoire, méthode « Merge » seule,
 suppression et force-push interdits, check obligatoire « Lint, typecheck, test, build » (non strict). Pas d'approbation
-obligatoire (mainteneuse unique) et « Migrations » non obligatoire (workflow conditionnel). La revue QUALITÉ et l'attente de
+obligatoire et « Migrations » non obligatoire (workflow conditionnel). La revue QUALITÉ et l'attente de
 la CI de `main` entre deux fusions restent donc des règles de discipline, pas des contrôles GitHub.
 
 Plan CI : QUALITÉ étend `oralink-ci.yml` à **toutes les PR vers `main`** (typecheck/tests, suite d'isolation + migrations
 rejouées sur base vierge, gitleaks, `node --test` de `oralink/`), jobs non conditionnels. Une fois ces jobs verts sur 2 PR,
-la mainteneuse les rend obligatoires dans le ruleset (action humaine).
+ils sont rendus obligatoires dans le ruleset (action humaine).
 
 Déjà fusionné dans `main` (2026-10-23, méthode « Merge », CI de `main` verte après chaque fusion) — branches antérieures
 à la convention `feat/oralink-*`, conservées sous leur nom d'origine :

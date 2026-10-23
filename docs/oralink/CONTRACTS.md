@@ -12,7 +12,7 @@ Un chemin a un seul propriétaire. Les autres chantiers peuvent le **lire**, jam
 
 | Chantier | Branche | Possède (écriture) |
 |---|---|---|
-| Coordination | `agent/skills` | `docs/oralink/COORDINATION.md`, `docs/oralink/CONTRACTS.md`, `docs/oralink/CODEX.md`, `.claude/skills/oralink-*/` |
+| Coordination | `agent/skills` | `docs/oralink/COORDINATION.md`, `docs/oralink/CONTRACTS.md`, `docs/oralink/CODEX.md`, `docs/oralink/BOARD.md`, `.claude/skills/oralink-*/` |
 | DEVOPS | `feat/oralink-devops` | `deploy/oralink/**`, `docs/oralink/devops/**` |
 | SENDZEN | `feat/oralink-sendzen` | `oralink/sendzen-gateway/**`, `oralink/sendzen-test-kit/**`, `docs/oralink/sendzen/**`, nouveaux fichiers de test `src/**/*.gateway.test.ts` |
 | CRM MÉTIER | `feat/oralink-crm` | `supabase/migrations/9NN_oralink_*.sql`, `src/lib/oralink/**`, `oralink/crm/**`, `docs/oralink/crm/**`, **et seul autorisé** à modifier `src/app/api/whatsapp/webhook/route.ts` et les points d'envoi sortants (voir §5) |
