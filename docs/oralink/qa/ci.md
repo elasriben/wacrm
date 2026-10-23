@@ -41,7 +41,7 @@ ne touchent que le compte résolu, ne changent rien si le statut a bougé entre-
 Il vérifie aussi que l'index unique `idx_broadcast_recipients_wamid` empêche le même `wamid` dans deux comptes, puis rejoue
 le cas « même wamid dans A et B » sur un schéma hypothétique sans cet index. Sortie `CHECK … OK|FAIL`, `SUMMARY ok= fail=`, codes 0/1/2.
 
-Intégration possible, au choix de la mainteneuse :
+Intégration possible (décision humaine) :
 - **Job facultatif** `OraLink / postgrest checks (optional)` (non exigé par le ruleset) : environ 1 min 20 en local,
   dont environ 50 s pour le rejeu des migrations (fait une deuxième fois, en plus du job d'isolation). Coût supplémentaire :
   le téléchargement de l'image PostgREST (environ 5 Mo), environ 1 Go de mémoire, aucun secret.
