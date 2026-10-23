@@ -23,6 +23,8 @@ import { resumeAwaitingReply, runAutomationsForTrigger } from '@/lib/automations
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
+import { detectOptKeyword } from '@/lib/oralink/stop'
+import { handleInboundOptKeyword } from '@/lib/oralink/opt-keyword'
 import {
   applyBroadcastRecipientStatus,
   flagBroadcastReply,
@@ -779,6 +781,35 @@ async function processMessage(
   // so the broadcast's `replied_count` advances (via the aggregate
   // trigger installed in migration 003).
   await flagBroadcastReplyIfAny(accountId, contactRecord.id)
+
+  // OraLink STOP / START (CONTRACTS §5). Only a plain text message whose
+  // WHOLE normalised content is a keyword. Placed after the idempotent
+  // insert (a replay never re-acknowledges) and before every bot: a
+  // handled keyword is journaled + acknowledged once, then flows,
+  // automations and the AI reply are skipped for this message. The
+  // message itself stays in the inbox, and the public `message.received`
+  // event still fires.
+  const optKeyword =
+    message.type === 'text' ? detectOptKeyword(message.text?.body) : null
+  if (optKeyword) {
+    const opt = await handleInboundOptKeyword({
+      accountId,
+      contactId: contactRecord.id,
+      conversationId: conversation.id,
+      wamid: message.id,
+      keyword: optKeyword,
+    })
+    if (opt.handled) {
+      await dispatchWebhookEvent(supabaseAdmin(), accountId, 'message.received', {
+        conversation_id: conversation.id,
+        contact_id: contactRecord.id,
+        whatsapp_message_id: message.id,
+        content_type: contentType,
+        text: contentText,
+      })
+      return
+    }
+  }
 
   // ============================================================
   // Flow runner dispatch.

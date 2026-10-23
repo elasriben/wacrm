@@ -16,6 +16,8 @@ import {
   RATE_LIMITS,
 } from '@/lib/rate-limit'
 import { getT } from '@/lib/i18n/translate'
+import { blockedPhones } from '@/lib/oralink/consent'
+import { BROADCAST_OPT_OUT_ERROR } from '@/lib/oralink/broadcast-guard'
 
 const t = getT('Api')
 
@@ -163,6 +165,25 @@ export async function POST(request: Request) {
     }
     const templateRow = resolvedTemplate.row
 
+    // OraLink consent guard (CONTRACTS §5). This route only receives
+    // phone numbers, so they are matched to the account's contacts
+    // (phone_normalized) and checked with the same rule as
+    // canSendAutomated. A lookup failure fails CLOSED for the batch.
+    let optedOutPhones: Set<string>
+    try {
+      optedOutPhones = await blockedPhones(
+        accountId,
+        recipients.map((r) => sanitizePhoneForMeta(String(r.phone ?? ''))),
+        supabase
+      )
+    } catch (err) {
+      console.error('[broadcast] consent guard failed — batch refused:', err)
+      return NextResponse.json(
+        { error: 'Consent check failed; nothing was sent.' },
+        { status: 503 }
+      )
+    }
+
     const results: BroadcastResult[] = []
     let sentCount = 0
     let failedCount = 0
@@ -175,6 +196,16 @@ export async function POST(request: Request) {
           phone: recipient.phone,
           status: 'failed',
           error: t('broadcast.invalidPhoneFormat'),
+        })
+        failedCount++
+        continue
+      }
+
+      if (optedOutPhones.has(sanitized.replace(/\D/g, ''))) {
+        results.push({
+          phone: recipient.phone,
+          status: 'failed',
+          error: BROADCAST_OPT_OUT_ERROR,
         })
         failedCount++
         continue

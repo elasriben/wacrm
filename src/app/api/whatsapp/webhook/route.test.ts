@@ -8,6 +8,7 @@ const h = vi.hoisted(() => ({
   dispatchInboundToAiReply: vi.fn(),
   dispatchWebhookEvent: vi.fn(),
   applyMessageStatus: vi.fn(),
+  handleInboundOptKeyword: vi.fn(),
   state: {
     // Result the message upsert's .select() resolves to. A genuine insert
     // returns the row; a replayed delivery conflicts and returns [].
@@ -276,6 +277,9 @@ vi.mock('@/lib/webhooks/deliver', () => ({
 vi.mock('@/lib/whatsapp/message-status-sync', () => ({
   applyMessageStatus: h.applyMessageStatus,
 }))
+vi.mock('@/lib/oralink/opt-keyword', () => ({
+  handleInboundOptKeyword: h.handleInboundOptKeyword,
+}))
 
 import { POST } from './route'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
@@ -400,6 +404,11 @@ beforeEach(() => {
   h.dispatchInboundToAiReply.mockResolvedValue(undefined)
   h.dispatchWebhookEvent.mockResolvedValue(undefined)
   h.applyMessageStatus.mockResolvedValue([])
+  h.handleInboundOptKeyword.mockResolvedValue({
+    handled: true,
+    recorded: true,
+    acknowledged: true,
+  })
   h.runAutomationsForTrigger.mockImplementation(() => {
     h.state.automationStarted++
     return new Promise<void>((resolve) => {
@@ -1171,5 +1180,89 @@ describe('inbound webhook: first_inbound_message fires once', () => {
     h.state.messageUpsertResult = []
     await runWebhook()
     expect(h.state.firstInboundClaims).toBe(0)
+  })
+})
+
+// OraLink STOP / START (CONTRACTS §5). The consent journal + acknowledgement
+// are unit-tested in src/lib/oralink/opt-keyword.test.ts; here we check the
+// webhook wiring: whole-message detection, ordering after the idempotent
+// insert, and that no bot answers a handled keyword.
+describe('inbound webhook: OraLink STOP / START', () => {
+  const text = (body: string, id = 'wamid.STOP1') => ({ ...TEXT_MESSAGE, id, text: { body } })
+
+  it.each(['STOP', ' stop. ', 'Arrêt', 'désinscrire', 'UNSUBSCRIBE'])(
+    '%j is handled: consent handler called, flows / automations / AI skipped',
+    async (body) => {
+      await runWebhook(text(body))
+      expect(h.handleInboundOptKeyword).toHaveBeenCalledTimes(1)
+      expect(h.handleInboundOptKeyword).toHaveBeenCalledWith({
+        accountId: 'acc-1',
+        contactId: 'contact-1',
+        conversationId: 'conv-1',
+        wamid: 'wamid.STOP1',
+        keyword: 'stop',
+      })
+      expect(h.dispatchInboundToFlows).not.toHaveBeenCalled()
+      expect(h.resumeAwaitingReply).not.toHaveBeenCalled()
+      expect(h.runAutomationsForTrigger).not.toHaveBeenCalled()
+      expect(h.dispatchInboundToAiReply).not.toHaveBeenCalled()
+    },
+  )
+
+  it('the STOP message is still stored for the human inbox and still emits message.received', async () => {
+    await runWebhook(text('STOP'))
+    expect(h.state.upsertCalls).toHaveLength(1)
+    expect(h.state.upsertCalls[0].row).toMatchObject({ content_text: 'STOP', sender_type: 'customer' })
+    expect(h.dispatchWebhookEvent).toHaveBeenCalledWith(
+      expect.anything(),
+      'acc-1',
+      'message.received',
+      expect.objectContaining({ whatsapp_message_id: 'wamid.STOP1' }),
+    )
+  })
+
+  it('a replayed STOP delivery is not handled twice (no second acknowledgement)', async () => {
+    h.state.messageUpsertResult = []
+    await runWebhook(text('STOP'))
+    expect(h.handleInboundOptKeyword).not.toHaveBeenCalled()
+  })
+
+  it.each(['stop les messages', 'je veux arrêter', 'bus stop', 'hello'])(
+    '%j is a normal message: no consent handling, bots run',
+    async (body) => {
+      await runWebhook(text(body))
+      expect(h.handleInboundOptKeyword).not.toHaveBeenCalled()
+      expect(h.dispatchInboundToFlows).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it('a button tap labelled STOP is not treated as an opt-out (text messages only)', async () => {
+    await runWebhook({
+      id: 'wamid.BTN1',
+      from: '15551230000',
+      timestamp: '1700000000',
+      type: 'button',
+      button: { payload: 'STOP', text: 'STOP' },
+    })
+    expect(h.handleInboundOptKeyword).not.toHaveBeenCalled()
+  })
+
+  it('START passes the keyword through; when not handled the bots run normally', async () => {
+    h.handleInboundOptKeyword.mockResolvedValueOnce({
+      handled: false,
+      recorded: false,
+      acknowledged: false,
+    })
+    await runWebhook(text('START'))
+    expect(h.handleInboundOptKeyword).toHaveBeenCalledWith(
+      expect.objectContaining({ keyword: 'start' }),
+    )
+    expect(h.dispatchInboundToFlows).toHaveBeenCalledTimes(1)
+  })
+
+  it('a handled START skips the bots too (one acknowledgement, no double answer)', async () => {
+    await runWebhook(text('START'))
+    expect(h.dispatchInboundToFlows).not.toHaveBeenCalled()
+    expect(h.dispatchInboundToAiReply).not.toHaveBeenCalled()
   })
 })
