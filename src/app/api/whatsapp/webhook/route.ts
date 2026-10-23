@@ -301,13 +301,14 @@ async function resolveAccountForPhoneNumber(
     .select('account_id')
     .eq('phone_number_id', phoneNumberId)
 
+  // Logs carry no number identifier in clear, only the match count.
   if (error) {
-    console.error('Error resolving account for status update:', phoneNumberId, error)
+    console.error('Error resolving account for status update:', error)
     return null
   }
   if (!data || data.length !== 1) {
     console.error(
-      `Status update for phone_number_id ${phoneNumberId} matched ${data?.length ?? 0} configs; message statuses skipped`
+      `Status update matched ${data?.length ?? 0} configs for its receiving number; statuses skipped`
     )
     return null
   }
@@ -471,12 +472,21 @@ async function handleStatusUpdate(
   //    (added in migration 003). The aggregate trigger on
   //    broadcast_recipients re-derives the parent broadcast's
   //    sent/delivered/read/failed counts automatically.
-  await applyBroadcastRecipientStatus(supabaseAdmin(), {
-    whatsappMessageId: status.id,
-    status: status.status,
-    occurredAt: new Date(parseInt(status.timestamp) * 1000).toISOString(),
-    failure,
-  })
+  //    Scoped to the account resolved from the receiving number: with no
+  //    single owning account (number missing, unknown or ambiguous) no
+  //    recipient row is touched — a wamid alone never authorises a write.
+  if (!accountId) {
+    console.warn(
+      '[webhook] status update without a single resolved account; broadcast recipients and messages left untouched'
+    )
+  } else {
+    await applyBroadcastRecipientStatus(supabaseAdmin(), accountId, {
+      whatsappMessageId: status.id,
+      status: status.status,
+      occurredAt: new Date(parseInt(status.timestamp) * 1000).toISOString(),
+      failure,
+    })
+  }
 
   // 3) Webhook fan-out for messages we store (inbox / API sends).
   //    Runs last so a slow subscriber can't delay the mirrors above.
