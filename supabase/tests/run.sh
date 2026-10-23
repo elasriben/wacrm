@@ -58,11 +58,20 @@ echo "== $(ls "$WORK"/*.sql | wc -l) migrations appliquées"
 [ -f "$HERE/../ci/verify-schema.sql" ] && psql -q -v ON_ERROR_STOP=1 -f "$HERE/../ci/verify-schema.sql" && echo "== verify-schema.sql : OK"
 
 echo "== Tests d'isolation"
-OUT="$WORK/result.txt"
-psql -X -At -F ' | ' -f "$HERE/isolation.sql" >"$OUT" 2>"$WORK/err.txt" || true
-grep -E '^(PASS|FAIL) \|' "$OUT" | sort | sed 's/^/  /'
-SUMMARY="$(grep -E '^SUMMARY' "$OUT" || true)"
-[ -z "$SUMMARY" ] && { echo "Aucun résumé : le script de test a échoué."; head -20 "$WORK/err.txt"; exit 2; }
+# Chaque fichier produit ses lignes PASS/FAIL et sa propre ligne SUMMARY ; un fichier sans
+# résumé (script cassé) est une erreur d'environnement, pas un succès silencieux.
+TOTAL_PASS=0; TOTAL_FAIL=0
+for T in isolation.sql rls-coverage.sql; do
+  OUT="$WORK/result-$T.txt"
+  psql -X -At -F ' | ' -f "$HERE/$T" >"$OUT" 2>"$WORK/err-$T.txt" || true
+  grep -E '^(PASS|FAIL) \|' "$OUT" | sort | sed 's/^/  /'
+  S="$(grep -E '^SUMMARY pass=[0-9]+ fail=[0-9]+$' "$OUT" || true)"
+  [ -z "$S" ] && { echo "Aucun résumé pour $T : le script de test a échoué."; head -20 "$WORK/err-$T.txt"; exit 2; }
+  echo "   ($T : ${S#SUMMARY })"
+  P="${S#SUMMARY pass=}"; P="${P%% *}"; F="${S##* fail=}"
+  TOTAL_PASS=$((TOTAL_PASS + P)); TOTAL_FAIL=$((TOTAL_FAIL + F))
+done
+SUMMARY="SUMMARY pass=$TOTAL_PASS fail=$TOTAL_FAIL"
 echo "== $SUMMARY"
 [ "${KEEP_DB:-0}" = "1" ] || psql -d postgres -qc "DROP DATABASE IF EXISTS \"$TEST_DB\"" || true
-grep -q ' fail=0$' <<<"$SUMMARY"
+[ "$TOTAL_FAIL" -eq 0 ]
