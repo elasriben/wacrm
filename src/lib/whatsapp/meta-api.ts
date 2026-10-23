@@ -11,11 +11,11 @@
 
 import { isBusinessScopedUserId } from './wa-identity'
 import { getT } from '@/lib/i18n/translate'
+import { resolveGraphApiBase } from './graph-base'
 
 const ti = getT('Validation.interactive')
 
-const META_API_VERSION = 'v21.0'
-const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`
+const META_API_BASE = resolveGraphApiBase()
 
 export interface MetaSendResult {
   messageId: string
