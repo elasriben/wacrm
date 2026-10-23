@@ -20,7 +20,7 @@ ne le remplace pas.
 | `OraLink / node --test (oralink packages)` | `npm test` (sans installation) dans chaque `oralink/<paquet>/` ayant un `package.json` ; sur une PR, `oralink/sendzen-gateway` et `oralink/sendzen-test-kit` doivent exister avec des `test/*.test.mjs`, sinon échec. Jamais de `node --test` nu (il prendrait `send-test.mjs` pour un test). |
 | `OraLink / workflow lint (actionlint)` | actionlint (avec shellcheck) sur tous les workflows. |
 
-## Les rendre obligatoires (action humaine, mainteneuse)
+## Les rendre obligatoires (action humaine)
 GitHub → *Settings* → *Rules* → *Rulesets* → ruleset de `main` → *Require status checks to pass* → *Add checks* :
 ajouter les cinq noms ci-dessus **à l'identique**, en gardant « Lint, typecheck, test, build ». Un check n'est
 proposé qu'après avoir tourné au moins une fois : ouvrir d'abord une PR qui contient ce workflow.
