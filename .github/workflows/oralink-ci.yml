@@ -1,12 +1,13 @@
 name: OraLink CI
 
-# Runs on the fork's working branches only. main keeps the upstream ci.yml /
-# migrations.yml workflows; nothing here triggers on main.
+# Every pull request (including PRs into main) and pushes to the fork's
+# working branches. A push to main is deliberately NOT a trigger: the upstream
+# ci.yml / migrations.yml workflows cover main. No pull_request_target: PR code
+# never runs with write tokens or secrets.
 on:
   push:
-    branches: ['sync/**', 'exp/**', 'ci/**']
+    branches: ['sync/**', 'exp/**', 'ci/**', 'feat/**', 'fix/**', 'chore/**']
   pull_request:
-    branches: ['sync/**', 'exp/**', 'ci/**']
 
 permissions:
   contents: read
@@ -53,7 +54,7 @@ jobs:
         run: npm test
 
   isolation:
-    name: Supabase isolation suite (71 checks)
+    name: Supabase isolation + RLS coverage (77 checks)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
@@ -85,7 +86,7 @@ jobs:
       - name: Run supabase/tests/run.sh
         run: |
           bash supabase/tests/run.sh | tee isolation.log
-          grep -qx '== SUMMARY pass=71 fail=0' isolation.log
+          grep -qx '== SUMMARY pass=77 fail=0' isolation.log
 
   secrets:
     name: Secret scan (gitleaks)
@@ -106,3 +107,51 @@ jobs:
             -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
             ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
             git /repo --log-opts="origin/main..HEAD" --redact --no-banner --exit-code 1
+
+  oralink-node-tests:
+    name: OraLink node --test (oralink/**)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      # Zero-dependency tests: no npm install. Collects oralink/**/test/*.test.mjs
+      # (a test/ directory at any depth); a branch without oralink/ or without
+      # such tests passes with an explicit notice instead of failing.
+      - name: node --test
+        run: |
+          node --version
+          if [ ! -d oralink ]; then
+            echo "::notice::no oralink/ directory on this ref: nothing to test"
+            exit 0
+          fi
+          mapfile -t files < <(find oralink -type f -name '*.test.mjs' -path '*/test/*' \
+            -not -path '*/node_modules/*' | awk -F/ '$(NF-1) == "test"' | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::notice::no oralink/**/test/*.test.mjs file on this ref: nothing to test"
+            exit 0
+          fi
+          printf 'test file: %s\n' "${files[@]}"
+          node --test "${files[@]}"
+
+  actionlint:
+    name: Workflow lint (actionlint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Image pinned by digest (rhysd/actionlint, bundles shellcheck); read-only mount.
+      - name: actionlint
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro" -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color
