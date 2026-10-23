@@ -53,7 +53,7 @@ Noms réservés. Aucune valeur réelle dans le dépôt : `.env.example` avec des
 | `ORALINK_BACKUP_TARGET` | `backup.sh` | destination hors Oracle ❓ (décision humaine) |
 
 Incompatibilité connue : `resolveGraphApiBase` (`src/lib/whatsapp/graph-base.ts`, PR #3) exige `https`, alors que la
-passerelle écoute en `http` sur le réseau Docker interne. Correctif proposé, **PR séparée** `feat/oralink-graph-http-allowlist`
+passerelle écoute en `http` sur le réseau Docker interne. Correctif : **PR séparée #6** `feat/oralink-graph-http-allowlist`
 après fusion de #3 : accepter `http` uniquement si le nom d'hôte figure exactement dans `WHATSAPP_API_ALLOWED_HTTP_HOSTS`
 (comparaison exacte, insensible à la casse ; pas de joker, pas de suffixe) ; `https` inchangé ; identifiants, query et fragment
 toujours refusés. Tests : hôte listé accepté, hôte non listé refusé, variable vide = comportement actuel, sous-domaine ou

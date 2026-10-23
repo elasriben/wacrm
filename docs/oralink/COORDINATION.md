@@ -28,6 +28,15 @@ Mécanisme : sous-agents Claude Code, un worktree Git par chantier (pas d'Agent 
 
 Intégration dans `main` par PR distinctes, dans cet ordre (une PR n'est fusionnée que CI verte + revue QUALITÉ) :
 
+Protection de `main` (ruleset GitHub, **décision humaine : ne pas modifier**) : PR obligatoire, méthode « Merge » seule,
+suppression et force-push interdits, check obligatoire « Lint, typecheck, test, build » (non strict). Pas d'approbation
+obligatoire (mainteneuse unique) et « Migrations » non obligatoire (workflow conditionnel). La revue QUALITÉ et l'attente de
+la CI de `main` entre deux fusions restent donc des règles de discipline, pas des contrôles GitHub.
+
+Plan CI : QUALITÉ étend `oralink-ci.yml` à **toutes les PR vers `main`** (typecheck/tests, suite d'isolation + migrations
+rejouées sur base vierge, gitleaks, `node --test` de `oralink/`), jobs non conditionnels. Une fois ces jobs verts sur 2 PR,
+la mainteneuse les rend obligatoires dans le ruleset (action humaine).
+
 Déjà fusionné dans `main` (2026-10-23, méthode « Merge », CI de `main` verte après chaque fusion) — branches antérieures
 à la convention `feat/oralink-*`, conservées sous leur nom d'origine :
 
@@ -43,8 +52,8 @@ Reste à intégrer :
 | # | PR | Dépend de | Remarque |
 |---|---|---|---|
 | 1 | `agent/skills` | — | ce document, contrats, skills v2, stratégie Codex (nom demandé explicitement, hors convention) |
-| 2 | `feat/oralink-qa` (phase 1 : CI sur toutes les PR) | 1 | doit précéder les autres pour les valider |
-| 3 | `feat/oralink-graph-http-allowlist` | #3 | liste blanche d'hôtes HTTP internes (CONTRACTS §3) — nécessaire pour `http://sendzen-gateway:8080` |
+| 2 | `feat/oralink-qa` (phase 1 : OraLink CI sur toutes les PR vers `main`, voir « Plan CI ») | 1 | doit précéder les autres pour les valider |
+| 3 | `feat/oralink-graph-http-allowlist` (PR #6, ouverte) | #3 | liste blanche d'hôtes HTTP internes (CONTRACTS §3) — nécessaire pour `http://sendzen-gateway:8080` |
 | 4 | `feat/oralink-sendzen` | 3 | passerelle + kit + tests d'intégration |
 | 5 | `feat/oralink-devops` | 2 | pile ARM64, Caddy, scripts, sauvegardes, doc VM |
 | 6 | `feat/oralink-crm` (migrations + consentement/STOP + scoring) | 2 | migrations `9NN_oralink_*` ; webhook ; points d'envoi en dernier commit |
