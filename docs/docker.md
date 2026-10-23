@@ -57,6 +57,12 @@ docker run -d --env-file .env.local -e PORT=3000 -p 3000:3000 wacrm
 
 ## Notes
 
+- `WHATSAPP_API_ALLOWED_HTTP_HOSTS` (see `.env.local.example`) is for
+  **internal http only**: list a gateway reachable solely on the
+  private Docker network (e.g. `sendzen-gateway`). Never publish the
+  gateway's port outside the machine (no `ports:` mapping, no firewall
+  rule): the access token travels to it unencrypted as a Bearer header.
+
 - Database migrations under `supabase/` are **not** run by the
   container — apply them with the Supabase CLI as described in the
   README.
