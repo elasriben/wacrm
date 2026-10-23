@@ -167,6 +167,9 @@ DO $$ DECLARE ok boolean; BEGIN
 END $$;
 
 -- ---------- structure ----------
+INSERT INTO ores SELECT 'redeem_invitation data check covers contact_consents and lead_scores (902)',
+  d ~ 'FROM contact_consents WHERE account_id = v_old_account_id' AND d ~ 'FROM lead_scores WHERE account_id = v_old_account_id', ''
+ FROM (SELECT pg_get_functiondef('public.redeem_invitation(text)'::regprocedure) d) f;
 INSERT INTO ores SELECT 'index on contact_consents(contact_id) for erasure cascade', count(*)=1, string_agg(indexname,',') FROM pg_indexes WHERE schemaname='public' AND tablename='contact_consents' AND indexdef ~ '\(contact_id\)$';
 INSERT INTO ores SELECT 'RLS enabled on contact_consents and lead_scores', count(*)=2, string_agg(relname,',') FROM pg_class WHERE oid IN ('public.contact_consents'::regclass,'public.lead_scores'::regclass) AND relrowsecurity;
 INSERT INTO ores SELECT 'no UPDATE/DELETE policy on contact_consents', count(*)=0, string_agg(policyname,',') FROM pg_policies WHERE schemaname='public' AND tablename='contact_consents' AND cmd IN ('UPDATE','DELETE','ALL');
