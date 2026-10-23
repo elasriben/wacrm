@@ -18,7 +18,7 @@ import {
   verifyMetaWebhookSignature,
   verifyTokenMatches,
 } from '@/lib/whatsapp/webhook-signature'
-import { readCappedBody } from '@/lib/whatsapp/webhook-body'
+import { readCappedBodyBytes } from '@/lib/whatsapp/webhook-body'
 import { resumeAwaitingReply, runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
@@ -230,21 +230,34 @@ export async function GET(request: Request) {
 
 // POST - Receive messages
 export async function POST(request: Request) {
-  // Read raw body first so we can HMAC-verify the exact bytes Meta
-  // signed. request.json() would re-encode and break the signature.
-  const rawBody = await readCappedBody(request)
-  if (rawBody === null) {
+  // Order matters, and nothing touches the database before the end:
+  //   1. read the EXACT bytes (size-capped → 413);
+  //   2. HMAC over those bytes (→ 401). Decoding first would be lossy:
+  //      invalid UTF-8 collapses to U+FFFD, so different bodies could
+  //      verify against the same signature;
+  //   3. strict UTF-8 decode (→ 400 on invalid bytes, even when signed);
+  //   4. JSON parse (→ 400).
+  const rawBytes = await readCappedBodyBytes(request)
+  if (rawBytes === null) {
     console.warn('[webhook] rejected oversized payload')
     return NextResponse.json({ error: 'Payload too large' }, { status: 413 })
   }
   const signature = request.headers.get('x-hub-signature-256')
 
-  if (!verifyMetaWebhookSignature(rawBody, signature)) {
+  if (!verifyMetaWebhookSignature(rawBytes, signature)) {
     // 401 (not 200) — we want Meta's delivery dashboard to show failures
     // loudly if a misconfiguration causes signatures to stop matching,
     // rather than silently eating events.
     console.warn('[webhook] rejected request with invalid signature')
     return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
+  }
+
+  let rawBody: string
+  try {
+    rawBody = new TextDecoder('utf-8', { fatal: true }).decode(rawBytes)
+  } catch {
+    console.warn('[webhook] rejected signed payload that is not valid UTF-8')
+    return NextResponse.json({ error: 'Invalid UTF-8' }, { status: 400 })
   }
 
   let body: { entry?: WhatsAppWebhookEntry[] }
