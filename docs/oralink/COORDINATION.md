@@ -46,6 +46,7 @@ Déjà fusionné dans `main` (2026-10-23, méthode « Merge », CI de `main` ver
 | #2 | `fix/lf-eol` | fins de ligne LF pour `*.sh` et `*.sql` | `9f15c06` |
 | #3 | `exp/graph-base-url` | `WHATSAPP_API_BASE_URL` configurable (https obligatoire) | `53ed5e1` |
 | #4 | `exp/z-prime-gateway` | prototype passerelle SendZen + kit de test de contrat | `d54bea6` |
+| #6 | `feat/oralink-graph-http-allowlist` | liste blanche `WHATSAPP_API_ALLOWED_HTTP_HOSTS` + réserve « http interne uniquement » | `5d6f212` |
 
 Reste à intégrer :
 
@@ -53,16 +54,15 @@ Reste à intégrer :
 |---|---|---|---|
 | 1 | `agent/skills` | — | ce document, contrats, skills v2, stratégie Codex (nom demandé explicitement, hors convention) |
 | 2 | `feat/oralink-qa` (phase 1 : OraLink CI sur toutes les PR vers `main`, voir « Plan CI ») | 1 | doit précéder les autres pour les valider |
-| 3 | `feat/oralink-graph-http-allowlist` (PR #6, ouverte) | #3 | liste blanche d'hôtes HTTP internes (CONTRACTS §3) — nécessaire pour `http://sendzen-gateway:8080` |
-| 4 | `feat/oralink-sendzen` | 3 | passerelle + kit + tests d'intégration |
-| 5 | `feat/oralink-devops` | 2 | pile ARM64, Caddy, scripts, sauvegardes, doc VM |
-| 6 | `feat/oralink-crm` (migrations + consentement/STOP + scoring) | 2 | migrations `9NN_oralink_*` ; webhook ; points d'envoi en dernier commit |
-| 7 | `feat/oralink-crm-content` (pipelines, flows FR/darija, semis) | 6 | |
-| 8 | `feat/oralink-qa` (phase 2 : isolation des nouvelles tables, vérification des sauvegardes) | 5, 6 | |
+| 3 | `feat/oralink-sendzen` | PR #6 ✅ | passerelle + kit + tests d'intégration |
+| 4 | `feat/oralink-devops` | 2 | pile ARM64, Caddy, scripts, sauvegardes, doc VM |
+| 5 | `feat/oralink-crm` (migrations + consentement/STOP + scoring) | 2 | migrations `9NN_oralink_*` ; webhook ; points d'envoi en dernier commit |
+| 6 | `feat/oralink-crm-content` (pipelines, flows FR/darija, semis) | 5 | |
+| 7 | `feat/oralink-qa` (phase 2 : isolation des nouvelles tables, vérification des sauvegardes) | 4, 5 | |
 
 Séquencement imposé (fichiers sensibles partagés) :
 - `src/app/api/whatsapp/webhook/route.ts` : CRM MÉTIER seul. QUALITÉ n'y ajoute que des **nouveaux fichiers de test**.
-- `supabase/migrations/9NN_oralink_*` : CRM MÉTIER seul. QUALITÉ étend `supabase/tests/` **après** la PR CRM (n° 6).
+- `supabase/migrations/9NN_oralink_*` : CRM MÉTIER seul. QUALITÉ étend `supabase/tests/` **après** la PR CRM (n° 5).
 - `oralink-ci.yml` : QUALITÉ seul.
 
 ## Chemin critique vers le MVP (objectif 2 à 4 semaines, non garanti)

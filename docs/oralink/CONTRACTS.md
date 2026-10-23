@@ -45,15 +45,15 @@ Noms réservés. Aucune valeur réelle dans le dépôt : `.env.example` avec des
 | `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | waCRM ✅ | |
 | `ENCRYPTION_KEY` | waCRM ✅ | 64 hex ; chiffre les jetons `whatsapp_config` |
 | `META_APP_SECRET` | waCRM ✅ | liste séparée par des virgules ; contient le(s) secret(s) de webhook SendZen |
-| `WHATSAPP_API_BASE_URL` | waCRM ✅ (PR #3) | cible : `http://sendzen-gateway:8080` — **refusé aujourd'hui** (https obligatoire), voir ci-dessous |
-| `WHATSAPP_API_ALLOWED_HTTP_HOSTS` | waCRM ❓ (à venir) | liste blanche explicite d'hôtes internes autorisés en `http`, séparés par des virgules (ex. `sendzen-gateway`) |
+| `WHATSAPP_API_BASE_URL` | waCRM ✅ (PR #3) | cible : `http://sendzen-gateway:8080` — accepté seulement avec `WHATSAPP_API_ALLOWED_HTTP_HOSTS=sendzen-gateway` ; **http interne uniquement, jamais de port de la passerelle exposé hors machine** |
+| `WHATSAPP_API_ALLOWED_HTTP_HOSTS` | waCRM ✅ (PR #6) | liste blanche explicite d'hôtes internes autorisés en `http`, séparés par des virgules (ex. `sendzen-gateway`) |
 | `SENDZEN_API_BASE`, `NUMBER_MAP`, `ALLOW_TYPES`, `MAX_BODY_BYTES`, `SENDZEN_TIMEOUT_MS` | passerelle ✅ | voir `oralink/sendzen-gateway/.env.example` |
 | `ORALINK_DOMAIN`, `ORALINK_ACME_EMAIL` | Caddy | |
 | `ORALINK_BACKUP_RECIPIENT` | `backup.sh` | clé publique de chiffrement ; la clé privée ne va **jamais** sur la VM |
 | `ORALINK_BACKUP_TARGET` | `backup.sh` | destination hors Oracle ❓ (décision humaine) |
 
-Incompatibilité connue : `resolveGraphApiBase` (`src/lib/whatsapp/graph-base.ts`, PR #3) exige `https`, alors que la
-passerelle écoute en `http` sur le réseau Docker interne. Correctif : **PR séparée #6** `feat/oralink-graph-http-allowlist`
+Incompatibilité (résolue) : `resolveGraphApiBase` (`src/lib/whatsapp/graph-base.ts`, PR #3) exige `https`, alors que la
+passerelle écoute en `http` sur le réseau Docker interne. Corrigé par la **PR #6** (fusionnée, `5d6f212`) `feat/oralink-graph-http-allowlist`
 après fusion de #3 : accepter `http` uniquement si le nom d'hôte figure exactement dans `WHATSAPP_API_ALLOWED_HTTP_HOSTS`
 (comparaison exacte, insensible à la casse ; pas de joker, pas de suffixe) ; `https` inchangé ; identifiants, query et fragment
 toujours refusés. Tests : hôte listé accepté, hôte non listé refusé, variable vide = comportement actuel, sous-domaine ou
