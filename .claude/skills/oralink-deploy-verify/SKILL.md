@@ -11,10 +11,10 @@ Règles
 - Tout code tiers s'exécute dans un conteneur jetable sans secret.
 
 Checklist (rapporter chaque point comme RÉUSSI / ÉCHEC / NON TESTÉ avec la sortie réelle)
-1. `bash -n` et shellcheck sur chaque script de `oralink/deploy/`.
-2. `docker compose -f oralink/deploy/compose.oralink.yml config` valide ; images avec variante linux/arm64 (`docker manifest inspect`).
+1. `bash -n` et shellcheck sur chaque script de `deploy/oralink/scripts/`.
+2. `docker compose -f deploy/oralink/compose.yml config` valide ; images avec variante linux/arm64 (`docker manifest inspect`).
 3. `.env.example` : aucune valeur réelle ; chaque variable documentée.
-4. Installation sur environnement jetable : `install.sh` idempotent (deux exécutions de suite, même résultat), puis `verify.sh` (santé de chaque service).
+4. Installation sur environnement jetable : `deploy/oralink/scripts/install.sh` idempotent (deux exécutions de suite, même résultat), puis `verify.sh` (santé de chaque service).
 5. Migrations : rejeu complet sur base vierge ; suite `supabase/tests/run.sh` attendue 71/71 (ou le nombre courant) ; ne jamais rejouer les anciennes migrations sur une base existante.
 6. Sauvegarde chiffrée puis restauration sur base jetable ; comparer les comptes de lignes ; chronométrer.
 7. `update.sh` puis `rollback.sh` sur environnement jetable.
