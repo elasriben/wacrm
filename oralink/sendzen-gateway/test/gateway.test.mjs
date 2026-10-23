@@ -7,7 +7,7 @@ const closeServer = (s) => new Promise((resolve) => { const t = setTimeout(resol
 
 const TOKEN = 'sz_test_SECRET_TOKEN_123'
 let mock, gw, base, logs, handler
-const NUMBER_MAP = JSON.stringify({ '111111111111111': { from: '+212600000001', label: 'tranzit-test' }, '222222222222222': { from: '+212600000002', label: 'immerview-test' } })
+const NUMBER_MAP = JSON.stringify({ '111111111111111': { from: '+15555550100', label: 'tranzit-test' }, '222222222222222': { from: '+15555550101', label: 'immerview-test' } })
 
 before(async () => {
   mock = await startMockSendzen((c) => handler(c))
@@ -29,22 +29,22 @@ beforeEach(async () => {
 const post = (path, body, headers = { authorization: `Bearer ${TOKEN}` }) =>
   fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) })
 
-const text = { messaging_product: 'whatsapp', to: '212600000099', type: 'text', text: { body: 'Bonjour' } }
+const text = { messaging_product: 'whatsapp', to: '15555550199', type: 'text', text: { body: 'Bonjour' } }
 
 test('text: translated to POST /v1/messages with from, without messaging_product; Bearer forwarded untouched', async () => {
   const r = await post('/v21.0/111111111111111/messages', text)
   assert.equal(r.status, 200)
-  assert.deepEqual(await r.json(), { messaging_product: 'whatsapp', contacts: [{ input: '212600000099', wa_id: '212600000099' }], messages: [{ id: 'wamid.MOCK1' }] })
+  assert.deepEqual(await r.json(), { messaging_product: 'whatsapp', contacts: [{ input: '15555550199' }], messages: [{ id: 'wamid.MOCK1' }] })
   assert.equal(mock.calls.length, 1)
   assert.equal(mock.calls[0].url, '/v1/messages')
   assert.equal(mock.calls[0].auth, `Bearer ${TOKEN}`)
-  assert.deepEqual(mock.calls[0].body, { from: '+212600000001', to: '212600000099', type: 'text', text: { body: 'Bonjour' } })
+  assert.deepEqual(mock.calls[0].body, { from: '+15555550100', to: '15555550199', type: 'text', text: { body: 'Bonjour' } })
 })
 
 test('multi-number routing: each phone_number_id maps to its own sender', async () => {
   await post('/v21.0/111111111111111/messages', text)
   await post('/v21.0/222222222222222/messages', text)
-  assert.deepEqual(mock.calls.map((c) => c.body.from), ['+212600000001', '+212600000002'])
+  assert.deepEqual(mock.calls.map((c) => c.body.from), ['+15555550100', '+15555550101'])
 })
 
 test('unknown phone_number_id: 404 and SendZen is never called', async () => {
@@ -55,7 +55,7 @@ test('unknown phone_number_id: 404 and SendZen is never called', async () => {
 
 test('reply buttons keep the Meta/SendZen interactive structure', async () => {
   const interactive = { type: 'button', body: { text: 'Vous êtes ?' }, action: { buttons: [{ type: 'reply', reply: { id: 'drv', title: 'Chauffeur' } }, { type: 'reply', reply: { id: 'car', title: 'Transporteur' } }] } }
-  const r = await post('/v21.0/111111111111111/messages', { messaging_product: 'whatsapp', to: '212600000099', type: 'interactive', interactive })
+  const r = await post('/v21.0/111111111111111/messages', { messaging_product: 'whatsapp', to: '15555550199', type: 'interactive', interactive })
   assert.equal(r.status, 200)
   assert.deepEqual(mock.calls[0].body.interactive, interactive)
   assert.equal(mock.calls[0].body.type, 'interactive')
@@ -63,7 +63,7 @@ test('reply buttons keep the Meta/SendZen interactive structure', async () => {
 
 test('list is forwarded as-is (NOT yet confirmed by SendZen docs — see TEST-PLAN T-S4)', async () => {
   const interactive = { type: 'list', body: { text: 'Choisir' }, action: { button: 'Voir', sections: [{ title: 'S', rows: [{ id: 'r1', title: 'A' }] }] } }
-  const r = await post('/v21.0/111111111111111/messages', { messaging_product: 'whatsapp', to: '212600000099', type: 'interactive', interactive })
+  const r = await post('/v21.0/111111111111111/messages', { messaging_product: 'whatsapp', to: '15555550199', type: 'interactive', interactive })
   assert.equal(r.status, 200)
   assert.deepEqual(mock.calls[0].body.interactive, interactive)
 })
@@ -152,7 +152,7 @@ test('logs never contain the token, message text or phone numbers', async () => 
   await post('/v21.0/111111111111111/messages', text)
   const all = logs.join('\n')
   assert.ok(logs.length > 0)
-  for (const secret of [TOKEN, 'Bonjour', '212600000099', '+212600000001']) assert.ok(!all.includes(secret), `log leaked ${secret}`)
+  for (const secret of [TOKEN, 'Bonjour', '15555550199', '+15555550100']) assert.ok(!all.includes(secret), `log leaked ${secret}`)
 })
 
 test('config validation: invalid NUMBER_MAP / non-https SendZen base are rejected at startup', () => {
