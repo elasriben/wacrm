@@ -10,7 +10,8 @@
  * The value is operator-controlled (an environment variable), never user
  * input, so it is not subject to the SSRF guard — but it is validated here
  * because the access token is sent to it as a Bearer credential:
- *   - https only (plain http is accepted for loopback hosts, for tests);
+ *   - https only (plain http is accepted for loopback hosts, for tests, and
+ *     for the internal hosts listed in `WHATSAPP_API_ALLOWED_HTTP_HOSTS`);
  *   - no embedded credentials, query string or fragment;
  *   - trailing slashes are removed.
  * An invalid value throws at startup rather than silently falling back to
@@ -20,7 +21,26 @@ export const DEFAULT_GRAPH_API_BASE = 'https://graph.facebook.com/v21.0'
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 
-export function resolveGraphApiBase(raw: string | undefined = process.env.WHATSAPP_API_BASE_URL): string {
+/**
+ * `WHATSAPP_API_ALLOWED_HTTP_HOSTS` — comma-separated host names (no scheme,
+ * port, path or wildcard) that may be reached over plain http, e.g. a gateway
+ * on a private Docker network (`sendzen-gateway`). Matching is exact and
+ * case-insensitive: `sendzen-gateway` does not allow `sendzen-gateway.evil.example`.
+ * Unset or blank keeps the https-only behaviour.
+ */
+export function parseAllowedHttpHosts(raw: string | undefined): Set<string> {
+  return new Set(
+    (raw ?? '')
+      .split(',')
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean),
+  )
+}
+
+export function resolveGraphApiBase(
+  raw: string | undefined = process.env.WHATSAPP_API_BASE_URL,
+  allowedHttpHosts: string | undefined = process.env.WHATSAPP_API_ALLOWED_HTTP_HOSTS,
+): string {
   const value = raw?.trim()
   if (!value) return DEFAULT_GRAPH_API_BASE
 
@@ -30,9 +50,11 @@ export function resolveGraphApiBase(raw: string | undefined = process.env.WHATSA
   } catch {
     throw new Error('WHATSAPP_API_BASE_URL is not a valid URL')
   }
-  const loopback = LOOPBACK_HOSTS.has(url.hostname)
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
-    throw new Error('WHATSAPP_API_BASE_URL must use https (http is only allowed for localhost)')
+  const httpAllowed = LOOPBACK_HOSTS.has(url.hostname) || parseAllowedHttpHosts(allowedHttpHosts).has(url.hostname)
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && httpAllowed)) {
+    throw new Error(
+      'WHATSAPP_API_BASE_URL must use https (http is only allowed for localhost and WHATSAPP_API_ALLOWED_HTTP_HOSTS)',
+    )
   }
   if (url.username || url.password) {
     throw new Error('WHATSAPP_API_BASE_URL must not contain credentials')

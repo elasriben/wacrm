@@ -34,6 +34,13 @@ La **réception** ne passe pas par la passerelle : SendZen appelle directement `
 La passerelle **ne fabrique jamais** de succès : tout ce qui n'est pas établi renvoie une erreur de forme Meta
 (`error.type = GatewayNotImplemented`, HTTP 501) que waCRM affiche comme une vraie erreur.
 
+## Déploiement — réserve http
+
+waCRM n'accepte `WHATSAPP_API_BASE_URL=http://sendzen-gateway:8080` que si `sendzen-gateway` figure dans
+`WHATSAPP_API_ALLOWED_HTTP_HOSTS`. **http interne uniquement, jamais de port de la passerelle exposé hors machine** :
+pas de `ports:` dans Compose, pas de règle de pare-feu ouvrant `8080` ; le jeton d'accès y transite en clair
+(en-tête `Authorization: Bearer`). Contrôle : CONTRACTS §2 (ports publics = {80, 443}) et `verify.sh`.
+
 ## Routage multi-numéros
 - waCRM identifie un numéro par `phone_number_id` (colonne `whatsapp_config`, **un numéro par compte**) à l'envoi (chemin) **et** à la réception (`metadata.phone_number_id`).
 - La passerelle a une table `NUMBER_MAP` : `phone_number_id → from`. Identifiant inconnu → **404**, SendZen non appelé.
