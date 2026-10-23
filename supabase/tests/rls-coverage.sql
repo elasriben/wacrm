@@ -14,7 +14,10 @@
 --   5. la liste blanche ne référence que des tables existantes (pas d'exemption orpheline).
 --
 -- Exécuter UNIQUEMENT sur la base jetable créée par run.sh.
-\set ON_ERROR_STOP off
+-- ON (contrairement à isolation.sql, qui provoque des erreurs attendues) : aucune requête
+-- ici ne doit échouer, et un contrôle en erreur ne doit pas disparaître en silence du
+-- SUMMARY. psql s'arrête avant la ligne SUMMARY, ce que run.sh signale par le code 2.
+\set ON_ERROR_STOP on
 SET client_min_messages = warning;
 CREATE TEMP TABLE res(test text, ok boolean, info text);
 
@@ -38,7 +41,7 @@ CREATE TEMP VIEW public_tables AS
      -- partitions héritent des politiques de leur parent : seul le parent est contrôlé
      AND NOT c.relispartition;
 
--- 37 tables publiques au f9ba8c6 (README). Le seuil prouve que les migrations ont bien été rejouées.
+-- 37 tables publiques sur main @ 5d6f212 (README). Le seuil prouve que les migrations ont bien été rejouées.
 INSERT INTO res SELECT 'RLS coverage: control - public schema has at least 37 tables', count(*) >= 37, count(*)::text || ' tables'
   FROM public_tables;
 

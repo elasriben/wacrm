@@ -258,7 +258,7 @@ describe('POST signature: accepted with multi-value META_APP_SECRET', () => {
     expect(res.status).toBe(200)
   })
 
-  it('invalid UTF-8 bytes signed over the raw bytes are rejected (fails closed, see qa/plan.md)', async () => {
+  it('invalid UTF-8 bytes signed over the raw bytes are rejected (fails closed: false reject, never an acceptance)', async () => {
     // readCappedBody decodes to a string (U+FFFD replacement) before the HMAC,
     // so the HMAC is not over the exact bytes received. Effect: a false reject,
     // never an acceptance. Meta always sends valid UTF-8 JSON.

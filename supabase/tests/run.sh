@@ -9,6 +9,7 @@
 # Code de sortie : 0 si tous les contrôles passent, 1 sinon, 2 en cas d'erreur d'environnement.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CUSTOM_MIGRATIONS="${MIGRATIONS_DIR:+1}"
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-$HERE/../migrations}"
 TEST_DB="${TEST_DB:-wacrm_isolation_test}"
 export PGHOST="${PGHOST:-127.0.0.1}" PGPORT="${PGPORT:-5432}" PGOPTIONS='-c client_min_messages=warning'
@@ -55,7 +56,19 @@ for f in "$WORK"/*.sql; do
   psql -q -v ON_ERROR_STOP=1 -f "$f" >"$WORK/out.log" 2>&1 || { echo "ÉCHEC migration $(basename "$f")"; grep -iE 'error|detail' "$WORK/out.log" | head -5; exit 2; }
 done
 echo "== $(ls "$WORK"/*.sql | wc -l) migrations appliquées"
-[ -f "$HERE/../ci/verify-schema.sql" ] && psql -q -v ON_ERROR_STOP=1 -f "$HERE/../ci/verify-schema.sql" && echo "== verify-schema.sql : OK"
+# Une liste `a && b && c` qui échoue ne déclenche pas `set -e` : l'échec de verify-schema.sql
+# était ignoré en silence. Il est désormais fatal (code 2) sur les migrations du dépôt ; avec un
+# MIGRATIONS_DIR personnalisé (ancien schéma, cf. « Vérifier que les tests savent détecter une
+# faille »), le schéma attendu peut légitimement différer : simple avertissement.
+if [ -f "$HERE/../ci/verify-schema.sql" ]; then
+  if psql -q -v ON_ERROR_STOP=1 -f "$HERE/../ci/verify-schema.sql"; then
+    echo "== verify-schema.sql : OK"
+  elif [ -n "$CUSTOM_MIGRATIONS" ]; then
+    echo "== verify-schema.sql : ÉCHEC (ignoré : MIGRATIONS_DIR personnalisé)"
+  else
+    echo "ÉCHEC verify-schema.sql sur les migrations du dépôt"; exit 2
+  fi
+fi
 
 echo "== Tests d'isolation"
 # Chaque fichier produit ses lignes PASS/FAIL et sa propre ligne SUMMARY ; un fichier sans
@@ -64,7 +77,9 @@ TOTAL_PASS=0; TOTAL_FAIL=0
 for T in isolation.sql rls-coverage.sql; do
   OUT="$WORK/result-$T.txt"
   psql -X -At -F ' | ' -f "$HERE/$T" >"$OUT" 2>"$WORK/err-$T.txt" || true
-  grep -E '^(PASS|FAIL) \|' "$OUT" | sort | sed 's/^/  /'
+  # `|| true` : sans ligne PASS/FAIL, grep renvoie 1 et pipefail + set -e quitteraient en
+  # silence (code 1) avant le diagnostic « Aucun résumé » (code 2) ci-dessous.
+  { grep -E '^(PASS|FAIL) \|' "$OUT" || true; } | sort | sed 's/^/  /'
   S="$(grep -E '^SUMMARY pass=[0-9]+ fail=[0-9]+$' "$OUT" || true)"
   [ -z "$S" ] && { echo "Aucun résumé pour $T : le script de test a échoué."; head -20 "$WORK/err-$T.txt"; exit 2; }
   echo "   ($T : ${S#SUMMARY })"
