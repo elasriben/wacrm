@@ -76,14 +76,22 @@ echo "== Tests d'isolation"
 TOTAL_PASS=0; TOTAL_FAIL=0
 for T in isolation.sql rls-coverage.sql; do
   OUT="$WORK/result-$T.txt"
-  psql -X -At -F ' | ' -f "$HERE/$T" >"$OUT" 2>"$WORK/err-$T.txt" || true
+  # Le code de sortie de psql n'est plus ignoré : les deux fichiers tournent avec ON_ERROR_STOP on,
+  # donc une requête en erreur (contrôle qui disparaîtrait) = code 2, même si un SUMMARY a été écrit.
+  RC=0; psql -X -At -F ' | ' -f "$HERE/$T" >"$OUT" 2>"$WORK/err-$T.txt" || RC=$?
   # `|| true` : sans ligne PASS/FAIL, grep renvoie 1 et pipefail + set -e quitteraient en
-  # silence (code 1) avant le diagnostic « Aucun résumé » (code 2) ci-dessous.
+  # silence (code 1) avant les diagnostics (code 2) ci-dessous.
   { grep -E '^(PASS|FAIL) \|' "$OUT" || true; } | sort | sed 's/^/  /'
+  [ "$RC" -eq 0 ] || { echo "psql a échoué sur $T (code $RC) : contrôle en erreur, résultat invalide."; head -20 "$WORK/err-$T.txt"; exit 2; }
   S="$(grep -E '^SUMMARY pass=[0-9]+ fail=[0-9]+$' "$OUT" || true)"
   [ -z "$S" ] && { echo "Aucun résumé pour $T : le script de test a échoué."; head -20 "$WORK/err-$T.txt"; exit 2; }
+  [ "$(printf '%s\n' "$S" | wc -l)" -eq 1 ] || { echo "Plusieurs lignes SUMMARY pour $T."; exit 2; }
   echo "   ($T : ${S#SUMMARY })"
   P="${S#SUMMARY pass=}"; P="${P%% *}"; F="${S##* fail=}"
+  # Le résumé doit correspondre aux lignes réellement produites (pas de compteur non vérifié).
+  NP="$(grep -cE '^PASS \|' "$OUT" || true)"; NF="$(grep -cE '^FAIL \|' "$OUT" || true)"
+  [ "$NP" -eq "$P" ] && [ "$NF" -eq "$F" ] || { echo "Incohérence $T : SUMMARY pass=$P fail=$F, lignes PASS=$NP FAIL=$NF."; exit 2; }
+  [ $((P + F)) -gt 0 ] || { echo "Aucun contrôle exécuté dans $T."; exit 2; }
   TOTAL_PASS=$((TOTAL_PASS + P)); TOTAL_FAIL=$((TOTAL_FAIL + F))
 done
 SUMMARY="SUMMARY pass=$TOTAL_PASS fail=$TOTAL_FAIL"

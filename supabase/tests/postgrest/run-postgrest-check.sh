@@ -188,4 +188,8 @@ http PATCH "/broadcast_recipients?whatsapp_message_id=eq.$WSHARED&$PRED" "$PATCH
 check shared_wamid_negative_control_hits_both "$(is "$CODE $(rows)" "200 $(printf '%s\n' "$RA3" "$RB3" | sort | tr '\n' ' ' | sed 's/ $//')")" "http=$CODE rows=[$(rows)]"
 
 echo "SUMMARY ok=$OK fail=$FAIL"
+# Nombre de contrôles exécutés vérifié : un contrôle supprimé ou sauté ne doit pas laisser un
+# « fail=0 » vert. Ajouter un contrôle = mettre à jour EXPECTED_CHECKS.
+EXPECTED_CHECKS=13
+[ $((OK + FAIL)) -eq "$EXPECTED_CHECKS" ] || die "$((OK + FAIL)) contrôles exécutés, $EXPECTED_CHECKS attendus"
 [ "$FAIL" -eq 0 ]

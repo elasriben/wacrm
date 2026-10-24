@@ -90,11 +90,11 @@ jobs:
 
       # run.sh exits 0 only on "SUMMARY pass=N fail=0". The extra check is a
       # floor, not an exact pin: tests can be added (N grows) without editing
-      # this file, but silently losing tests (N < 77, the count at the time the
+      # this file, but silently losing tests (N < 80, the count at the time the
       # floor was set) fails the job.
       - name: Run supabase/tests/run.sh
         env:
-          MIN_PASS: '77'
+          MIN_PASS: '80'
         run: |
           set -o pipefail
           bash supabase/tests/run.sh | tee isolation.log
