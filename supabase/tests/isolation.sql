@@ -1,4 +1,4 @@
--- Suite d'isolation entre deux comptes (OraLink) — 71 contrôles au 34bce1a.
+-- Suite d'isolation entre deux comptes (OraLink) — 74 contrôles (71 au 34bce1a + 3 contrôles « CONTROL » de rôle, QUALITÉ).
 --
 -- Exécuter UNIQUEMENT sur une base jetable (voir supabase/tests/README.md et run.sh).
 -- Le script crée des utilisateurs et des données de test, puis rejoue des
@@ -8,7 +8,20 @@
 -- prouvent que les données de test existent réellement : sans eux, un test
 -- du type « A ne voit rien du compte B » pourrait réussir sur une base vide.
 -- Aucun secret réel : tout est fictif (@test.local, +2126000000xx, tokA/tokB).
-\set ON_ERROR_STOP off
+--
+-- Anti faux succès (QUALITÉ, 24/10/2026) :
+--  * ON_ERROR_STOP on : une requête de contrôle en erreur (table renommée, faute de frappe)
+--    interrompt le fichier avant SUMMARY (run.sh : code 2) au lieu de faire disparaître
+--    ses contrôles en silence. Une exécution normale ne produit aucune erreur hors des blocs
+--    BEGIN/EXCEPTION (vérifié en conteneur).
+--  * Un refus attendu n'est compté PASS que s'il lève insufficient_privilege (SQLSTATE 42501 :
+--    violation de politique RLS, droit EXECUTE retiré, garde explicite des RPC). Toute autre
+--    erreur (fonction absente 42883, colonne inconnue, contrainte...) n'est pas une preuve
+--    d'isolation : elle remonte et arrête le fichier.
+--  * Contrôles « CONTROL » : les requêtes tournent bien sous authenticated/anon, rôles sans
+--    SUPERUSER ni BYPASSRLS et propriétaires d'aucune table de public (sinon la RLS ne
+--    s'appliquerait pas et tous les « 0 ligne » ci-dessous seraient sans valeur).
+\set ON_ERROR_STOP on
 SET client_min_messages = warning;
 CREATE TEMP TABLE res(test text, ok boolean, info text);
 GRANT ALL ON res TO PUBLIC;
@@ -62,6 +75,9 @@ CREATE OR REPLACE FUNCTION pg_temp.as_user(uid uuid) RETURNS void LANGUAGE plpgs
 
 -- READ isolation, user A1 vs account B rows
 SET ROLE authenticated; SELECT pg_temp.as_user('a0000000-0000-0000-0000-000000000001');
+INSERT INTO res SELECT 'CONTROL: checks run as authenticated (no SUPERUSER/BYPASSRLS)',
+  current_user = 'authenticated' AND NOT r.rolsuper AND NOT r.rolbypassrls,
+  current_user || ' super=' || r.rolsuper || ' bypassrls=' || r.rolbypassrls FROM pg_roles r WHERE r.rolname = current_user;
 INSERT INTO res SELECT 'A1 sees own contacts', count(*)=1, count(*)::text FROM contacts;
 INSERT INTO res SELECT 'A1 sees NO account-B '||t, c=0, c::text FROM (
  SELECT 'contacts' t,(SELECT count(*) FROM contacts WHERE account_id=(SELECT accB FROM ids)) c UNION ALL
@@ -88,35 +104,40 @@ INSERT INTO res SELECT 'A2 (agent, same account) sees account-A conversation', c
 SELECT pg_temp.as_user('a0000000-0000-0000-0000-000000000001');
 DO $$ DECLARE n int; accB uuid; ok boolean; BEGIN
  SELECT ids.accB INTO accB FROM ids;
- BEGIN INSERT INTO contacts(user_id,phone,account_id) VALUES ('a0000000-0000-0000-0000-000000000001','+212611111111',accB); ok:=false; EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN INSERT INTO contacts(user_id,phone,account_id) VALUES ('a0000000-0000-0000-0000-000000000001','+212611111111',accB); ok:=false; EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('A1 cannot INSERT contact into account B', ok, '');
- BEGIN INSERT INTO contacts(user_id,phone,account_id) VALUES ('b0000000-0000-0000-0000-000000000001','+212622222222',accB); ok:=false; EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN INSERT INTO contacts(user_id,phone,account_id) VALUES ('b0000000-0000-0000-0000-000000000001','+212622222222',accB); ok:=false; EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('A1 cannot INSERT contact as user B into B', ok, '');
  UPDATE contacts SET name='hacked' WHERE account_id=accB; GET DIAGNOSTICS n=ROW_COUNT; INSERT INTO res VALUES ('A1 cannot UPDATE B contacts', n=0, n::text);
  DELETE FROM contacts WHERE account_id=accB; GET DIAGNOSTICS n=ROW_COUNT; INSERT INTO res VALUES ('A1 cannot DELETE B contacts', n=0, n::text);
  UPDATE automations SET name='hacked' WHERE name='autoB'; GET DIAGNOSTICS n=ROW_COUNT; INSERT INTO res VALUES ('A1 cannot UPDATE B automations', n=0, n::text);
  UPDATE whatsapp_config SET access_token='x' WHERE phone_number_id='PNID_B'; GET DIAGNOSTICS n=ROW_COUNT; INSERT INTO res VALUES ('A1 cannot UPDATE B whatsapp_config', n=0, n::text);
- BEGIN INSERT INTO messages(conversation_id,sender_type,content_text) SELECT id,'agent','injected' FROM conversations WHERE account_id=accB LIMIT 1; GET DIAGNOSTICS n=ROW_COUNT; ok:=(n=0); EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN INSERT INTO messages(conversation_id,sender_type,content_text) SELECT id,'agent','injected' FROM conversations WHERE account_id=accB LIMIT 1; GET DIAGNOSTICS n=ROW_COUNT; ok:=(n=0); EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('A1 cannot INSERT message into B conversation', ok, '');
- BEGIN UPDATE profiles SET account_id=accB, account_role='owner' WHERE user_id='a0000000-0000-0000-0000-000000000001'; GET DIAGNOSTICS n=ROW_COUNT; ok:=(n=0); EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN UPDATE profiles SET account_id=accB, account_role='owner' WHERE user_id='a0000000-0000-0000-0000-000000000001'; GET DIAGNOSTICS n=ROW_COUNT; ok:=(n=0); EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('A1 cannot move own profile into account B', ok, '');
  BEGIN UPDATE profiles SET account_role='owner' WHERE user_id='a0000000-0000-0000-0000-000000000002'; GET DIAGNOSTICS n=ROW_COUNT; INSERT INTO res VALUES ('(info) owner promoting teammate allowed?', true, 'rows='||n); EXCEPTION WHEN OTHERS THEN INSERT INTO res VALUES ('(info) owner promote teammate error', true, SQLERRM); END;
 END $$;
 -- agent A2 privilege escalation
 SELECT pg_temp.as_user('a0000000-0000-0000-0000-000000000002');
 DO $$ DECLARE n int; ok boolean; BEGIN
- BEGIN UPDATE profiles SET account_role='owner' WHERE user_id='a0000000-0000-0000-0000-000000000002'; GET DIAGNOSTICS n=ROW_COUNT; ok:=(n=0 OR (SELECT account_role FROM profiles WHERE user_id='a0000000-0000-0000-0000-000000000002')<>'owner'); EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN UPDATE profiles SET account_role='owner' WHERE user_id='a0000000-0000-0000-0000-000000000002'; GET DIAGNOSTICS n=ROW_COUNT; ok:=(n=0 OR (SELECT account_role FROM profiles WHERE user_id='a0000000-0000-0000-0000-000000000002')<>'owner'); EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('agent cannot self-promote to owner', ok, '');
- BEGIN UPDATE accounts SET name='hijack' WHERE id=(SELECT accA FROM ids); GET DIAGNOSTICS n=ROW_COUNT; ok:=(n=0); EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN UPDATE accounts SET name='hijack' WHERE id=(SELECT accA FROM ids); GET DIAGNOSTICS n=ROW_COUNT; ok:=(n=0); EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('agent cannot rename account', ok, 'rows='||coalesce(n,0));
 END $$;
 -- ANON
 RESET ROLE; SET ROLE anon; SELECT set_config('request.jwt.claim.sub','',false), set_config('request.jwt.claim.role','anon',false);
-DO $$ DECLARE t text; n int; bad text:=''; BEGIN
+INSERT INTO res SELECT 'CONTROL: anon checks run as anon (no SUPERUSER/BYPASSRLS)',
+  current_user = 'anon' AND NOT r.rolsuper AND NOT r.rolbypassrls,
+  current_user || ' super=' || r.rolsuper || ' bypassrls=' || r.rolbypassrls FROM pg_roles r WHERE r.rolname = current_user;
+-- Une table refusée à anon (42501) compte comme « 0 ligne lue » ; toute autre erreur arrête le fichier.
+DO $$ DECLARE t text; n int; bad text:=''; scanned int:=0; denied int:=0; BEGIN
  FOR t IN SELECT tablename FROM pg_tables WHERE schemaname='public' LOOP
-  BEGIN EXECUTE format('SELECT count(*) FROM public.%I',t) INTO n; IF n>0 THEN bad:=bad||t||'('||n||') '; END IF; EXCEPTION WHEN OTHERS THEN NULL; END;
+  scanned:=scanned+1;
+  BEGIN EXECUTE format('SELECT count(*) FROM public.%I',t) INTO n; IF n>0 THEN bad:=bad||t||'('||n||') '; END IF; EXCEPTION WHEN insufficient_privilege THEN denied:=denied+1; END;
  END LOOP;
- INSERT INTO res VALUES ('anon reads 0 rows in all 37 public tables', bad='', bad);
+ INSERT INTO res VALUES ('anon reads 0 rows in every public table (at least 37 scanned)', bad='' AND scanned>=37, bad||'scanned='||scanned||' denied='||denied);
 END $$;
 INSERT INTO res SELECT 'anon cannot list storage objects (chat-media/flow-media)', count(*)=0, count(*)::text FROM storage.objects WHERE bucket_id IN ('chat-media','flow-media');
 -- STORAGE as A1
@@ -128,13 +149,13 @@ INSERT INTO res SELECT 'A1 storage: sees NO account-B objects', count(*)=0, coun
 -- cross-account use of membership RPCs
 SELECT pg_temp.as_user('a0000000-0000-0000-0000-000000000001');
 DO $$ DECLARE ok boolean; BEGIN
- BEGIN PERFORM public.remove_account_member('b0000000-0000-0000-0000-000000000001'); ok:=false; EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN PERFORM public.remove_account_member('b0000000-0000-0000-0000-000000000001'); ok:=false; EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('owner A cannot remove_account_member of account B user', ok, '');
- BEGIN PERFORM public.set_member_role('b0000000-0000-0000-0000-000000000001','admin'); ok:=false; EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN PERFORM public.set_member_role('b0000000-0000-0000-0000-000000000001','admin'); ok:=false; EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('owner A cannot set_member_role of account B user', ok, '');
- BEGIN PERFORM public.transfer_account_ownership('b0000000-0000-0000-0000-000000000001'); ok:=false; EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN PERFORM public.transfer_account_ownership('b0000000-0000-0000-0000-000000000001'); ok:=false; EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('owner A cannot transfer ownership to account B user', ok, '');
- BEGIN PERFORM public.is_account_member((SELECT accB FROM ids)); INSERT INTO res SELECT 'is_account_member(B) false for A1', NOT public.is_account_member((SELECT accB FROM ids)), ''; EXCEPTION WHEN OTHERS THEN INSERT INTO res VALUES ('is_account_member(B) false for A1', true, SQLERRM); END;
+ BEGIN PERFORM public.is_account_member((SELECT accB FROM ids)); INSERT INTO res SELECT 'is_account_member(B) false for A1', NOT public.is_account_member((SELECT accB FROM ids)), ''; EXCEPTION WHEN insufficient_privilege THEN INSERT INTO res VALUES ('is_account_member(B) false for A1', true, SQLERRM); END;
 END $$;
 -- removed member keeps nothing (ex-member scenario at DB layer)
 RESET ROLE;
@@ -147,13 +168,13 @@ INSERT INTO res SELECT 'ex-member A2 sees 0 account-A automations after removal'
 INSERT INTO res SELECT 'ex-member A2 sees 0 account-A whatsapp_config after removal', count(*)=0, count(*)::text FROM whatsapp_config WHERE phone_number_id='PNID_A';
 RESET ROLE; SET ROLE anon; SELECT set_config('request.jwt.claim.sub','',false);
 DO $$ DECLARE ok boolean; BEGIN
- BEGIN PERFORM public.remove_account_member('a0000000-0000-0000-0000-000000000001'); ok:=false; EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN PERFORM public.remove_account_member('a0000000-0000-0000-0000-000000000001'); ok:=false; EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('anon cannot call remove_account_member', ok, '');
- BEGIN PERFORM public.transfer_account_ownership('a0000000-0000-0000-0000-000000000001'); ok:=false; EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN PERFORM public.transfer_account_ownership('a0000000-0000-0000-0000-000000000001'); ok:=false; EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('anon cannot call transfer_account_ownership', ok, '');
- BEGIN PERFORM public.set_member_role('a0000000-0000-0000-0000-000000000001','viewer'); ok:=false; EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN PERFORM public.set_member_role('a0000000-0000-0000-0000-000000000001','viewer'); ok:=false; EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('anon cannot call set_member_role', ok, '');
- BEGIN PERFORM public.touch_presence('x'); ok:=false; EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ BEGIN PERFORM public.touch_presence('x'); ok:=false; EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO res VALUES ('anon cannot call touch_presence', ok, '');
 END $$;
 RESET ROLE;
@@ -162,6 +183,8 @@ INSERT INTO res SELECT 'EXECUTE revoked from anon/authenticated: '||p.oid::regpr
   NOT has_function_privilege('anon',p.oid,'EXECUTE') AND NOT has_function_privilege('authenticated',p.oid,'EXECUTE'), ''
  FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('_bcast_bump','recompute_broadcast_counts','claim_ai_reply_slot','record_webhook_failure','merge_duplicate_contacts','merge_duplicate_conversations');
 -- generic structure checks
+INSERT INTO res SELECT 'CONTROL: anon/authenticated own no public table (owners bypass RLS)', count(*)=0, string_agg(c.relname||':'||pg_get_userbyid(c.relowner),',')
+  FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m') AND pg_get_userbyid(c.relowner) IN ('anon','authenticated');
 INSERT INTO res SELECT 'RLS enabled on every public table', count(*)=0, string_agg(relname,',') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='r' AND NOT c.relrowsecurity;
 INSERT INTO res SELECT 'no policy with USING/CHECK literally true (non-service)', count(*)=0, string_agg(tablename||'.'||policyname,',') FROM pg_policies WHERE schemaname IN ('public','storage') AND (qual='true' OR with_check='true') ;
 INSERT INTO res SELECT 'no public-role policies on storage.objects for anon', count(*)=0, string_agg(policyname,',') FROM pg_policies WHERE schemaname='storage' AND tablename='objects' AND ('anon'=ANY(roles) OR 'public'=ANY(roles)) AND cmd IN ('SELECT','ALL');

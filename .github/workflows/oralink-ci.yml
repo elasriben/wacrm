@@ -1,12 +1,17 @@
 name: OraLink CI
 
-# Runs on the fork's working branches only. main keeps the upstream ci.yml /
-# migrations.yml workflows; nothing here triggers on main.
+# Every pull request (including PRs into main) and pushes to the fork's
+# working branches. A push to main is deliberately NOT a trigger: the upstream
+# ci.yml / migrations.yml workflows cover main. No pull_request_target: PR code
+# never runs with write tokens or secrets.
+#
+# Required-check friendly: no `paths` / `paths-ignore` filter and no job-level
+# `if:`, so every job reports a status on every PR into main (a job skipped by
+# a path filter would leave a required check pending forever).
 on:
   push:
-    branches: ['sync/**', 'exp/**', 'ci/**']
+    branches: ['sync/**', 'exp/**', 'ci/**', 'feat/**', 'fix/**', 'chore/**']
   pull_request:
-    branches: ['sync/**', 'exp/**', 'ci/**']
 
 permissions:
   contents: read
@@ -17,7 +22,9 @@ concurrency:
 
 jobs:
   app:
-    name: Typecheck, lint, unit tests
+    # Job names below are meant to become required status checks in the main
+    # ruleset: keep them stable (no counts, no versions). See docs/oralink/qa/ci.md.
+    name: OraLink / app (typecheck, lint, vitest)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # Same non-secret placeholders as the upstream ci.yml: they satisfy
@@ -53,7 +60,7 @@ jobs:
         run: npm test
 
   isolation:
-    name: Supabase isolation suite (71 checks)
+    name: OraLink / supabase isolation (migrations replay + RLS)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
@@ -81,14 +88,26 @@ jobs:
       - name: Tool versions
         run: psql --version && perl -v | sed -n 2p
 
-      # run.sh exits 0 only on "SUMMARY pass=N fail=0"; the extra check pins N.
+      # run.sh exits 0 only on "SUMMARY pass=N fail=0". The extra check is a
+      # floor, not an exact pin: tests can be added (N grows) without editing
+      # this file, but silently losing tests (N < 80, the count at the time the
+      # floor was set) fails the job.
       - name: Run supabase/tests/run.sh
+        env:
+          MIN_PASS: '80'
         run: |
+          set -o pipefail
           bash supabase/tests/run.sh | tee isolation.log
-          grep -qx '== SUMMARY pass=71 fail=0' isolation.log
+          summary="$(grep -E '^== SUMMARY pass=[0-9]+ fail=0$' isolation.log)" || {
+            echo "::error::no '== SUMMARY pass=N fail=0' line"; exit 1; }
+          pass="${summary#== SUMMARY pass=}"; pass="${pass%% *}"
+          echo "isolation checks passed: $pass (floor $MIN_PASS)"
+          if [ "$pass" -lt "$MIN_PASS" ]; then
+            echo "::error::only $pass checks passed, expected at least $MIN_PASS"; exit 1
+          fi
 
   secrets:
-    name: Secret scan (gitleaks)
+    name: OraLink / secret scan (gitleaks)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -97,7 +116,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Scans every commit this branch adds on top of the fork's main.
+      # Scans every commit this branch adds on top of the fork's main (on a PR,
+      # HEAD is the merge commit, so origin/main..HEAD = the PR's commits + merge).
       # Image pinned by digest (gitleaks v8.30.1); no license or token needed.
       - name: gitleaks
         run: |
@@ -106,3 +126,73 @@ jobs:
             -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
             ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
             git /repo --log-opts="origin/main..HEAD" --redact --no-banner --exit-code 1
+
+  oralink-node-tests:
+    name: OraLink / node --test (oralink packages)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      # Zero-dependency packages: no npm install, nothing from the registry.
+      # Every oralink/<pkg>/ with a package.json and a test/ directory runs
+      # its own `npm test` script (so per-package flags such as
+      # --test-timeout apply). On pull requests the packages already on main
+      # are REQUIRED: deleting them or their tests fails the job instead of
+      # passing on an empty set. Pushes of branches that predate oralink/
+      # (e.g. sync/** from upstream) only get a notice.
+      - name: node --test (each oralink package)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUIRED_PACKAGES: oralink/sendzen-gateway oralink/sendzen-test-kit
+        run: |
+          node --version
+          mapfile -t pkgs < <(find oralink -mindepth 2 -maxdepth 2 -name package.json \
+            -not -path '*/node_modules/*' -printf '%h\n' 2>/dev/null | sort)
+          if [ "$EVENT_NAME" = pull_request ]; then
+            for req in $REQUIRED_PACKAGES; do
+              if [ ! -f "$req/package.json" ] || ! ls "$req"/test/*.test.mjs >/dev/null 2>&1; then
+                echo "::error::required package $req (package.json + test/*.test.mjs) is missing"
+                exit 1
+              fi
+            done
+          fi
+          if [ "${#pkgs[@]}" -eq 0 ]; then
+            echo "::notice::no oralink/<pkg>/package.json on this ref: nothing to test"
+            exit 0
+          fi
+          status=0; ran=0
+          for pkg in "${pkgs[@]}"; do
+            if ! ls "$pkg"/test/*.test.mjs >/dev/null 2>&1; then
+              echo "::warning::$pkg has no test/*.test.mjs"
+              continue
+            fi
+            echo "::group::$pkg"
+            (cd "$pkg" && npm test) || { echo "::error::$pkg tests failed"; status=1; }
+            echo "::endgroup::"
+            ran=$((ran + 1))
+          done
+          echo "packages tested: $ran"
+          exit "$status"
+
+  actionlint:
+    name: OraLink / workflow lint (actionlint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Image pinned by digest (rhysd/actionlint, bundles shellcheck); read-only mount.
+      - name: actionlint
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro" -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color
