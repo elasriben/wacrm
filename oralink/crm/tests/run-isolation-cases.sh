@@ -33,8 +33,19 @@ OUT="$(mktemp)"
 PGOPTIONS='-c client_min_messages=warning' psql -X -At -F ' | ' -d "$TEST_DB" -f "$HERE/isolation-cases.sql" >"$OUT" 2>"$OUT.err" || true
 grep -E '^(PASS|FAIL) \|' "$OUT" | sort | sed 's/^/  /'
 SUMMARY="$(grep -E '^SUMMARY' "$OUT" || true)"
+
+# is-account-member.sql tourne en ON_ERROR_STOP on : une requête en erreur est une erreur d'environnement (2).
+echo "== is_account_member (is-account-member.sql, migration 903)"
+IAM="$(mktemp)"; IAM_RC=0
+PGOPTIONS='-c client_min_messages=warning' psql -X -At -F ' | ' -d "$TEST_DB" -f "$HERE/is-account-member.sql" >"$IAM" 2>"$IAM.err" || IAM_RC=$?
+{ grep -E '^(PASS|FAIL) \|' "$IAM" || true; } | sort | sed 's/^/  /'
+IAM_SUMMARY="$(grep -E '^SUMMARY' "$IAM" || true)"
+
 psql -d postgres -qc "DROP DATABASE IF EXISTS \"$TEST_DB\"" || true
 [ -z "$SUMMARY" ] && { echo "Aucun résumé :"; head -20 "$OUT.err"; exit 2; }
+[ "$IAM_RC" -eq 0 ] && [ -n "$IAM_SUMMARY" ] || { echo "is-account-member.sql en erreur (code $IAM_RC) :"; head -20 "$IAM.err"; exit 2; }
 echo "== ORALINK $SUMMARY"
+echo "== IS_ACCOUNT_MEMBER $IAM_SUMMARY"
 grep -q ' fail=0$' <<<"$SUMMARY" || rc=1
+grep -q ' fail=0$' <<<"$IAM_SUMMARY" || rc=1
 exit "$rc"
