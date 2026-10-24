@@ -54,8 +54,11 @@ pas de `ports:` dans Compose, pas de règle de pare-feu ouvrant `8080` ; le jeto
 | waCRM → passerelle | `Authorization: Bearer <clé SendZen du numéro>` (le « jeton d'accès » stocké chiffré dans `whatsapp_config`) | La passerelle n'a **aucun secret** à stocker. Elle n'écoute que sur le réseau interne Docker/127.0.0.1, jamais publiquement. |
 | passerelle → SendZen | même en-tête, transmis tel quel ; destination fixe `SENDZEN_API_BASE` (https) | Pas de SSRF possible : la destination n'est pas dérivée de la requête. |
 | SendZen → waCRM | `X-Hub-Signature-256: sha256=<hex>` (annoncé) | Vérifié par le code existant de waCRM ; secret ajouté à `META_APP_SECRET`. Compatibilité côté waCRM testée ; côté SendZen ❓ (T-S1). |
-- Journaux : méthode, forme de route, statut, latence uniquement. Jamais l'en-tête, les corps, les numéros ni le texte des messages (testé).
-- Corps limité (256 Ko par défaut), délai de 15 s vers SendZen, types de message en liste blanche (`ALLOW_TYPES`).
+- Journaux : méthode, forme de route (segments remplacés par `:id`), statut, latence, motif court. Jamais l'en-tête, les corps, les identifiants, les numéros ni le texte des messages (testé, C-16).
+- Corps entrant limité (256 Ko par défaut, `Content-Length` et flux chunked), réponse SendZen lue au plus 64 Ko, délai de 15 s vers SendZen, redirections amont jamais suivies, exception interne → 500 sans détail.
+- Corps sortant construit par liste blanche (`to`, `type`, `text`|`interactive`, `context.message_id`) ; `from` vient toujours de `NUMBER_MAP`.
+- `ALLOW_TYPES` ne peut que **restreindre** `text,interactive` (toute autre valeur fait échouer le démarrage).
+- Contrat détaillé, appel par appel, avec ✅/❓ : `docs/oralink/sendzen/contract.md`.
 
 ## Appels de configuration (décision requise)
 Le formulaire « Connecter WhatsApp » de waCRM appelle Meta (`verifyPhoneNumber`, `registerPhoneNumber`, `subscribeWabaToApp`, …).

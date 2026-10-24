@@ -34,7 +34,7 @@ const server = http.createServer(async (req, res) => {
   const rec = { receivedAt: new Date().toISOString(), method: req.method, headers: req.headers, rawBody: raw, events: extractEvents(parsed), signature: checkSignatures(req.headers, raw, SECRETS), respondedWith: 200 }
   if (failNext > 0) { failNext--; rec.respondedWith = 500 }
   records.push(rec); fs.appendFileSync(file, JSON.stringify(rec) + '\n')
-  console.log(`${rec.receivedAt} ${rec.respondedWith} events=${rec.events.map((e) => e.kind).join(',') || '-'} sig=${rec.signature.length ? 'VERIFIED(' + rec.signature.map((s) => `${s.header}:${s.encoding}`).join(';') + ')' : SECRETS.length ? 'NOT-VERIFIED' : 'no-secret-configured'}`)
+  console.log(`${rec.receivedAt} ${rec.respondedWith} events=${rec.events.map((e) => e.kind).join(',') || '-'} sig=${rec.signature.length ? (rec.signature.some((s) => s.wacrmCompatible) ? 'VERIFIED-WACRM-COMPATIBLE(' : 'VERIFIED-BUT-WACRM-INCOMPATIBLE(') + rec.signature.map((s) => `${s.header}:${s.encoding}`).join(';') + ')' : SECRETS.length ? 'NOT-VERIFIED' : 'no-secret-configured'}`)
   res.writeHead(rec.respondedWith, { 'content-type': 'application/json' }); res.end(rec.respondedWith === 200 ? '{"ok":true}' : '{"ok":false}')
 })
 server.listen(PORT, HOST, () => {
