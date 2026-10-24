@@ -31,6 +31,13 @@ vi.mock('@/lib/flows/meta-send', () => ({
 vi.mock('@/lib/whatsapp/meta-api', () => ({
   sendTypingIndicator: h.sendTypingIndicator,
 }))
+// OraLink consent guard: these tests cover the AI eligibility gates for a
+// contact who has NOT opted out. The opted-out case (no indicator, no LLM,
+// no send) is tested against the real guard in
+// src/lib/oralink/send-guards.test.ts.
+vi.mock('@/lib/oralink/consent', () => ({
+  canSendAutomated: async () => true,
+}))
 vi.mock('./admin-client', () => ({
   supabaseAdmin: () => ({
     from: (table: string) => {

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // Shared, hoisted state the module mocks close over. Reset per test.
 const h = vi.hoisted(() => ({
@@ -8,6 +8,7 @@ const h = vi.hoisted(() => ({
   dispatchInboundToAiReply: vi.fn(),
   dispatchWebhookEvent: vi.fn(),
   applyMessageStatus: vi.fn(),
+  handleInboundOptKeyword: vi.fn(),
   state: {
     // Result the message upsert's .select() resolves to. A genuine insert
     // returns the row; a replayed delivery conflicts and returns [].
@@ -43,6 +44,12 @@ const h = vi.hoisted(() => ({
     broadcastRecipient: null as { id: string; status: string } | null,
     /** Patches applied to that broadcast_recipients row. */
     recipientUpdates: [] as Record<string, unknown>[],
+    /** Extra recipient rows with an explicit wamid and owning account. */
+    extraRecipients: [] as { id: string; status: string; wamid: string; account_id: string }[],
+    /** Ids of every broadcast_recipients row an update matched. */
+    recipientUpdatedIds: [] as string[],
+    /** whatsapp_config rows the status lookup resolves; null = the default single row. */
+    configRows: null as Record<string, unknown>[] | null,
   },
 }))
 
@@ -65,7 +72,7 @@ vi.mock('@supabase/supabase-js', () => ({
               eq: (_column: string, value: unknown) => {
                 h.state.whatsappConfigLookups.push({ columns, value })
                 return Promise.resolve({
-                  data: [
+                  data: h.state.configRows ?? [
                     {
                       account_id: 'acc-1',
                       user_id: 'user-1',
@@ -110,34 +117,76 @@ vi.mock('@supabase/supabase-js', () => ({
               }),
             }),
           }
-        case 'broadcast_recipients':
+        case 'broadcast_recipients': {
+          // Rows visible to the fake: `broadcastRecipient` (account acc-1,
+          // any wamid — the #535 fixtures) plus `extraRecipients`, which
+          // carry an explicit wamid and owning account (N1 / N2).
+          const allRows = () => [
+            ...(h.state.broadcastRecipient
+              ? [{ ...h.state.broadcastRecipient, wamid: undefined as string | undefined, account_id: 'acc-1' }]
+              : []),
+            ...h.state.extraRecipients,
+          ]
+          const matches = (
+            r: { id: string; status: string; wamid?: string; account_id: string },
+            f: Record<string, unknown>,
+          ) =>
+            Object.entries(f).every(([col, val]) => {
+              if (col === 'whatsapp_message_id') return r.wamid === undefined || r.wamid === val
+              if (col === 'broadcasts.account_id') return r.account_id === val
+              if (col === 'contact_id') return false // flagBroadcastReply: no recent recipient
+              const actual = col === 'id' ? r.id : col === 'status' ? r.status : undefined
+              return Array.isArray(val) ? val.includes(actual) : actual === val
+            })
+          const row = (id: string) =>
+            h.state.broadcastRecipient?.id === id
+              ? h.state.broadcastRecipient
+              : h.state.extraRecipients.find((r) => r.id === id)
           return {
-            select: () => ({
-              eq: () => ({
-                eq: () => ({
-                  order: () => ({
-                    limit: () =>
-                      Promise.resolve({ data: [], error: null }),
-                  }),
-                }),
-              }),
-            }),
-            update: (patch: Record<string, unknown>) => ({
-              eq: () => ({
-                in: (_column: string, allowed: string[]) => ({
-                  select: () => {
-                    const row = h.state.broadcastRecipient
-                    const matches = !!row && allowed.includes(row.status)
-                    if (matches) h.state.recipientUpdates.push(patch)
-                    return Promise.resolve({
-                      data: matches ? [{ id: row!.id }] : [],
-                      error: null,
-                    })
-                  },
-                }),
-              }),
-            }),
+            // applyBroadcastRecipientStatus: select().eq().eq().in() (awaited)
+            // flagBroadcastReply:          select().eq().eq().order().limit()
+            select: (columns: string) => {
+              const f: Record<string, unknown> = {}
+              // Like real PostgREST: an embedded filter only restricts rows
+              // when the embed is !inner.
+              const inner = columns.includes('broadcasts!inner(')
+              const chain = {
+                eq: (col: string, val: unknown) => {
+                  if (col !== 'broadcasts.account_id' || inner) f[col] = val
+                  return chain
+                },
+                in: (col: string, vals: unknown[]) => ((f[col] = vals), chain),
+                order: () => chain,
+                limit: () => Promise.resolve({ data: [], error: null }),
+                then: (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
+                  Promise.resolve({
+                    data: allRows().filter((r) => matches(r, f)).map((r) => ({ id: r.id })),
+                    error: null,
+                  }).then(res, rej),
+              }
+              return chain
+            },
+            // apply: update().in('id', ids).in('status', allowed).select()
+            update: (patch: Record<string, unknown>) => {
+              const f: Record<string, unknown> = {}
+              const chain = {
+                eq: (col: string, val: unknown) => ((f[col] = val), chain),
+                in: (col: string, vals: unknown[]) => ((f[col] = vals), chain),
+                select: () => {
+                  const hit = allRows().filter((r) => matches(r, f))
+                  for (const r of hit) {
+                    h.state.recipientUpdates.push(patch)
+                    h.state.recipientUpdatedIds.push(r.id)
+                    const target = row(r.id)
+                    if (target) target.status = String(patch.status)
+                  }
+                  return Promise.resolve({ data: hit.map((r) => ({ id: r.id })), error: null })
+                },
+              }
+              return chain
+            },
           }
+        }
         case 'contacts':
           // Three chains land here, all from findOrCreateContact:
           //   findContactByWaUserId: select('*').eq().eq().maybeSingle()
@@ -276,12 +325,24 @@ vi.mock('@/lib/webhooks/deliver', () => ({
 vi.mock('@/lib/whatsapp/message-status-sync', () => ({
   applyMessageStatus: h.applyMessageStatus,
 }))
+vi.mock('@/lib/oralink/opt-keyword', () => ({
+  handleInboundOptKeyword: h.handleInboundOptKeyword,
+}))
+// Pass-through spy: real behaviour, but calls can be asserted (N1).
+vi.mock('@/lib/whatsapp/broadcast-recipient-webhook', async (orig) => {
+  const actual = await orig<typeof import('@/lib/whatsapp/broadcast-recipient-webhook')>()
+  return {
+    ...actual,
+    applyBroadcastRecipientStatus: vi.fn(actual.applyBroadcastRecipientStatus),
+  }
+})
 
 import { POST } from './route'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
 import { findExistingContact } from '@/lib/contacts/dedupe'
 import { handleTemplateWebhookChange } from '@/lib/whatsapp/template-webhook'
 import { MAX_WEBHOOK_BODY_BYTES } from '@/lib/whatsapp/webhook-body'
+import { applyBroadcastRecipientStatus } from '@/lib/whatsapp/broadcast-recipient-webhook'
 
 const mockGetMediaUrl = vi.mocked(getMediaUrl)
 const mockDownloadMedia = vi.mocked(downloadMedia)
@@ -381,6 +442,9 @@ beforeEach(() => {
   h.state.whatsappConfigLookups = []
   h.state.broadcastRecipient = null
   h.state.recipientUpdates = []
+  h.state.extraRecipients = []
+  h.state.recipientUpdatedIds = []
+  h.state.configRows = null
   mockFindExistingContact.mockResolvedValue({
     id: 'contact-1',
     name: 'Ada',
@@ -400,6 +464,11 @@ beforeEach(() => {
   h.dispatchInboundToAiReply.mockResolvedValue(undefined)
   h.dispatchWebhookEvent.mockResolvedValue(undefined)
   h.applyMessageStatus.mockResolvedValue([])
+  h.handleInboundOptKeyword.mockResolvedValue({
+    handled: true,
+    recorded: true,
+    acknowledged: true,
+  })
   h.runAutomationsForTrigger.mockImplementation(() => {
     h.state.automationStarted++
     return new Promise<void>((resolve) => {
@@ -1171,5 +1240,177 @@ describe('inbound webhook: first_inbound_message fires once', () => {
     h.state.messageUpsertResult = []
     await runWebhook()
     expect(h.state.firstInboundClaims).toBe(0)
+  })
+})
+
+// OraLink STOP / START (CONTRACTS §5). The consent journal + acknowledgement
+// are unit-tested in src/lib/oralink/opt-keyword.test.ts; here we check the
+// webhook wiring: whole-message detection, ordering after the idempotent
+// insert, and that no bot answers a handled keyword.
+describe('inbound webhook: OraLink STOP / START', () => {
+  const text = (body: string, id = 'wamid.STOP1') => ({ ...TEXT_MESSAGE, id, text: { body } })
+
+  it.each(['STOP', ' stop. ', 'Arrêt', 'désinscrire', 'UNSUBSCRIBE'])(
+    '%j is handled: consent handler called, flows / automations / AI skipped',
+    async (body) => {
+      await runWebhook(text(body))
+      expect(h.handleInboundOptKeyword).toHaveBeenCalledTimes(1)
+      expect(h.handleInboundOptKeyword).toHaveBeenCalledWith({
+        accountId: 'acc-1',
+        contactId: 'contact-1',
+        conversationId: 'conv-1',
+        wamid: 'wamid.STOP1',
+        keyword: 'stop',
+      })
+      expect(h.dispatchInboundToFlows).not.toHaveBeenCalled()
+      expect(h.resumeAwaitingReply).not.toHaveBeenCalled()
+      expect(h.runAutomationsForTrigger).not.toHaveBeenCalled()
+      expect(h.dispatchInboundToAiReply).not.toHaveBeenCalled()
+    },
+  )
+
+  it('the STOP message is still stored for the human inbox and still emits message.received', async () => {
+    await runWebhook(text('STOP'))
+    expect(h.state.upsertCalls).toHaveLength(1)
+    expect(h.state.upsertCalls[0].row).toMatchObject({ content_text: 'STOP', sender_type: 'customer' })
+    expect(h.dispatchWebhookEvent).toHaveBeenCalledWith(
+      expect.anything(),
+      'acc-1',
+      'message.received',
+      expect.objectContaining({ whatsapp_message_id: 'wamid.STOP1' }),
+    )
+  })
+
+  it('a replayed STOP delivery is not handled twice (no second acknowledgement)', async () => {
+    h.state.messageUpsertResult = []
+    await runWebhook(text('STOP'))
+    expect(h.handleInboundOptKeyword).not.toHaveBeenCalled()
+  })
+
+  it.each(['stop les messages', 'je veux arrêter', 'bus stop', 'hello'])(
+    '%j is a normal message: no consent handling, bots run',
+    async (body) => {
+      await runWebhook(text(body))
+      expect(h.handleInboundOptKeyword).not.toHaveBeenCalled()
+      expect(h.dispatchInboundToFlows).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it('a button tap labelled STOP is not treated as an opt-out (text messages only)', async () => {
+    await runWebhook({
+      id: 'wamid.BTN1',
+      from: '15551230000',
+      timestamp: '1700000000',
+      type: 'button',
+      button: { payload: 'STOP', text: 'STOP' },
+    })
+    expect(h.handleInboundOptKeyword).not.toHaveBeenCalled()
+  })
+
+  it('START passes the keyword through; when not handled the bots run normally', async () => {
+    h.handleInboundOptKeyword.mockResolvedValueOnce({
+      handled: false,
+      recorded: false,
+      acknowledged: false,
+    })
+    await runWebhook(text('START'))
+    expect(h.handleInboundOptKeyword).toHaveBeenCalledWith(
+      expect.objectContaining({ keyword: 'start' }),
+    )
+    expect(h.dispatchInboundToFlows).toHaveBeenCalledTimes(1)
+  })
+
+  it('a handled START skips the bots too (one acknowledgement, no double answer)', async () => {
+    await runWebhook(text('START'))
+    expect(h.dispatchInboundToFlows).not.toHaveBeenCalled()
+    expect(h.dispatchInboundToAiReply).not.toHaveBeenCalled()
+  })
+})
+
+// Broadcast recipient statuses are scoped to the account resolved from the
+// receiving number (metadata.phone_number_id). A wamid alone never
+// authorises a write.
+describe('status webhook: broadcast recipients scoped to the resolved account', () => {
+  const DELIVERED = {
+    id: 'wamid.OUT1',
+    status: 'delivered',
+    timestamp: '1700000100',
+    recipient_id: '15555550100',
+  }
+
+  async function postStatus(metadata: Record<string, unknown> | undefined) {
+    const body = {
+      entry: [{ changes: [{ field: 'messages', value: { ...(metadata ? { metadata } : {}), statuses: [DELIVERED] } }] }],
+    }
+    const res = await POST(signedPost(JSON.stringify(body)))
+    for (const cb of h.state.afterCallbacks) await cb()
+    return res as unknown as { init?: { status?: number } }
+  }
+
+  const mockedApply = vi.mocked(applyBroadcastRecipientStatus)
+  let error: { mockRestore: () => void }
+  let warn: { mockRestore: () => void }
+  beforeEach(() => {
+    error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // A sent recipient of account acc-1 holding the wamid.
+    h.state.extraRecipients = [{ id: 'rec-own', status: 'sent', wamid: 'wamid.OUT1', account_id: 'acc-1' }]
+  })
+  afterEach(() => {
+    error.mockRestore()
+    warn.mockRestore()
+  })
+
+  it.each([
+    ['unknown number (0 configs)', { phone_number_id: 'pn-unknown' }, []],
+    ['ambiguous number (2 configs)', { phone_number_id: 'pn-1' }, [{ account_id: 'acc-1' }, { account_id: 'acc-2' }]],
+    ['number absent from metadata', undefined, null],
+  ])('N1: %s → 200, no broadcast_recipients / messages update', async (_label, metadata, configRows) => {
+    h.state.configRows = configRows as Record<string, unknown>[] | null
+    const res = await postStatus(metadata)
+    expect(res.init?.status).toBe(200)
+    expect(mockedApply).not.toHaveBeenCalled()
+    expect(h.applyMessageStatus).not.toHaveBeenCalled()
+    expect(h.state.recipientUpdatedIds).toEqual([])
+    expect(h.state.extraRecipients[0].status).toBe('sent')
+  })
+
+  it('N1: the skip is logged without the number identifier in clear', async () => {
+    h.state.configRows = []
+    await postStatus({ phone_number_id: 'pn-secret-123' })
+    const logged = [...vi.mocked(console.error).mock.calls, ...vi.mocked(console.warn).mock.calls]
+      .flat()
+      .map(String)
+      .join('\n')
+    expect(logged).toContain('statuses skipped')
+    expect(logged).not.toContain('pn-secret-123')
+  })
+
+  it("N2: number of account A + wamid of a B broadcast → no B row modified", async () => {
+    h.state.extraRecipients = [{ id: 'rec-B', status: 'sent', wamid: 'wamid.OUT1', account_id: 'acc-2' }]
+    await postStatus({ phone_number_id: 'pn-1' }) // resolves to acc-1
+    expect(mockedApply).toHaveBeenCalledWith(expect.anything(), 'acc-1', expect.objectContaining({ whatsappMessageId: 'wamid.OUT1' }))
+    expect(h.state.recipientUpdatedIds).toEqual([])
+    expect(h.state.extraRecipients[0].status).toBe('sent')
+  })
+
+  // Defence in depth only: idx_broadcast_recipients_wamid (migration 003)
+  // is UNIQUE table-wide, so this cannot happen with the current schema.
+  it('same wamid in A and B (impossible today) → only the A row changes', async () => {
+    h.state.extraRecipients = [
+      { id: 'rec-A', status: 'sent', wamid: 'wamid.OUT1', account_id: 'acc-1' },
+      { id: 'rec-B', status: 'sent', wamid: 'wamid.OUT1', account_id: 'acc-2' },
+    ]
+    await postStatus({ phone_number_id: 'pn-1' })
+    expect(h.state.recipientUpdatedIds).toEqual(['rec-A'])
+    expect(h.state.extraRecipients.map((r) => r.status)).toEqual(['delivered', 'sent'])
+  })
+
+  it('P2: the owning account updates its recipient row', async () => {
+    await postStatus({ phone_number_id: 'pn-1' })
+    expect(mockedApply).toHaveBeenCalledTimes(1)
+    await expect(mockedApply.mock.results[0].value).resolves.toBe('updated')
+    expect(h.state.recipientUpdatedIds).toEqual(['rec-own'])
+    expect(h.state.recipientUpdates[0]).toMatchObject({ status: 'delivered' })
   })
 })

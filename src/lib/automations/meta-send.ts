@@ -17,6 +17,7 @@ import {
   templateHeaderMediaUrl,
 } from '@/lib/whatsapp/template-body'
 import { supabaseAdmin } from './admin-client'
+import { assertCanSendAutomated } from '@/lib/oralink/consent'
 import { getT } from '@/lib/i18n/translate'
 
 const t = getT('LibErrors')
@@ -115,6 +116,9 @@ type SendInput =
 
 async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: string }> {
   const db = supabaseAdmin()
+  // OraLink: single outbound consent guard (CONTRACTS §5). Throws
+  // ConsentBlockedError before any Meta call when the contact said STOP.
+  await assertCanSendAutomated(input.accountId, input.contactId, db)
 
   // Scope the contact + config lookups by account_id, not user_id.
   // The engine uses the service-role client (bypassing RLS); without

@@ -12,6 +12,7 @@ import {
   loadAccountMetaCredentials,
 } from '@/lib/flows/meta-send'
 import { sendTypingIndicator } from '@/lib/whatsapp/meta-api'
+import { canSendAutomated } from '@/lib/oralink/consent'
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
 
 interface DispatchArgs {
@@ -63,6 +64,11 @@ export async function dispatchInboundToAiReply(
 
     const config = await loadAiConfig(db, accountId)
     if (!config || !config.autoReplyEnabled) return
+
+    // OraLink consent guard (CONTRACTS §5): an opted-out contact gets no
+    // AI reply, no typing indicator and no LLM call. engineSendText below
+    // is guarded too; this early exit just avoids the wasted work.
+    if (!(await canSendAutomated(accountId, contactId, db))) return
 
     // Deterministic, user-configured responders win over the LLM — the
     // caller already excludes messages a Flow consumed. Message-level

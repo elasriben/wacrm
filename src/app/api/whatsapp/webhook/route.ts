@@ -18,11 +18,13 @@ import {
   verifyMetaWebhookSignature,
   verifyTokenMatches,
 } from '@/lib/whatsapp/webhook-signature'
-import { readCappedBody } from '@/lib/whatsapp/webhook-body'
+import { readCappedBodyBytes } from '@/lib/whatsapp/webhook-body'
 import { resumeAwaitingReply, runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
+import { detectOptKeyword } from '@/lib/oralink/stop'
+import { handleInboundOptKeyword } from '@/lib/oralink/opt-keyword'
 import {
   applyBroadcastRecipientStatus,
   flagBroadcastReply,
@@ -228,21 +230,34 @@ export async function GET(request: Request) {
 
 // POST - Receive messages
 export async function POST(request: Request) {
-  // Read raw body first so we can HMAC-verify the exact bytes Meta
-  // signed. request.json() would re-encode and break the signature.
-  const rawBody = await readCappedBody(request)
-  if (rawBody === null) {
+  // Order matters, and nothing touches the database before the end:
+  //   1. read the EXACT bytes (size-capped → 413);
+  //   2. HMAC over those bytes (→ 401). Decoding first would be lossy:
+  //      invalid UTF-8 collapses to U+FFFD, so different bodies could
+  //      verify against the same signature;
+  //   3. strict UTF-8 decode (→ 400 on invalid bytes, even when signed);
+  //   4. JSON parse (→ 400).
+  const rawBytes = await readCappedBodyBytes(request)
+  if (rawBytes === null) {
     console.warn('[webhook] rejected oversized payload')
     return NextResponse.json({ error: 'Payload too large' }, { status: 413 })
   }
   const signature = request.headers.get('x-hub-signature-256')
 
-  if (!verifyMetaWebhookSignature(rawBody, signature)) {
+  if (!verifyMetaWebhookSignature(rawBytes, signature)) {
     // 401 (not 200) — we want Meta's delivery dashboard to show failures
     // loudly if a misconfiguration causes signatures to stop matching,
     // rather than silently eating events.
     console.warn('[webhook] rejected request with invalid signature')
     return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
+  }
+
+  let rawBody: string
+  try {
+    rawBody = new TextDecoder('utf-8', { fatal: true }).decode(rawBytes)
+  } catch {
+    console.warn('[webhook] rejected signed payload that is not valid UTF-8')
+    return NextResponse.json({ error: 'Invalid UTF-8' }, { status: 400 })
   }
 
   let body: { entry?: WhatsAppWebhookEntry[] }
@@ -286,13 +301,14 @@ async function resolveAccountForPhoneNumber(
     .select('account_id')
     .eq('phone_number_id', phoneNumberId)
 
+  // Logs carry no number identifier in clear, only the match count.
   if (error) {
-    console.error('Error resolving account for status update:', phoneNumberId, error)
+    console.error('Error resolving account for status update:', error)
     return null
   }
   if (!data || data.length !== 1) {
     console.error(
-      `Status update for phone_number_id ${phoneNumberId} matched ${data?.length ?? 0} configs; message statuses skipped`
+      `Status update matched ${data?.length ?? 0} configs for its receiving number; statuses skipped`
     )
     return null
   }
@@ -456,12 +472,21 @@ async function handleStatusUpdate(
   //    (added in migration 003). The aggregate trigger on
   //    broadcast_recipients re-derives the parent broadcast's
   //    sent/delivered/read/failed counts automatically.
-  await applyBroadcastRecipientStatus(supabaseAdmin(), {
-    whatsappMessageId: status.id,
-    status: status.status,
-    occurredAt: new Date(parseInt(status.timestamp) * 1000).toISOString(),
-    failure,
-  })
+  //    Scoped to the account resolved from the receiving number: with no
+  //    single owning account (number missing, unknown or ambiguous) no
+  //    recipient row is touched — a wamid alone never authorises a write.
+  if (!accountId) {
+    console.warn(
+      '[webhook] status update without a single resolved account; broadcast recipients and messages left untouched'
+    )
+  } else {
+    await applyBroadcastRecipientStatus(supabaseAdmin(), accountId, {
+      whatsappMessageId: status.id,
+      status: status.status,
+      occurredAt: new Date(parseInt(status.timestamp) * 1000).toISOString(),
+      failure,
+    })
+  }
 
   // 3) Webhook fan-out for messages we store (inbox / API sends).
   //    Runs last so a slow subscriber can't delay the mirrors above.
@@ -779,6 +804,35 @@ async function processMessage(
   // so the broadcast's `replied_count` advances (via the aggregate
   // trigger installed in migration 003).
   await flagBroadcastReplyIfAny(accountId, contactRecord.id)
+
+  // OraLink STOP / START (CONTRACTS §5). Only a plain text message whose
+  // WHOLE normalised content is a keyword. Placed after the idempotent
+  // insert (a replay never re-acknowledges) and before every bot: a
+  // handled keyword is journaled + acknowledged once, then flows,
+  // automations and the AI reply are skipped for this message. The
+  // message itself stays in the inbox, and the public `message.received`
+  // event still fires.
+  const optKeyword =
+    message.type === 'text' ? detectOptKeyword(message.text?.body) : null
+  if (optKeyword) {
+    const opt = await handleInboundOptKeyword({
+      accountId,
+      contactId: contactRecord.id,
+      conversationId: conversation.id,
+      wamid: message.id,
+      keyword: optKeyword,
+    })
+    if (opt.handled) {
+      await dispatchWebhookEvent(supabaseAdmin(), accountId, 'message.received', {
+        conversation_id: conversation.id,
+        contact_id: contactRecord.id,
+        whatsapp_message_id: message.id,
+        content_type: contentType,
+        text: contentText,
+      })
+      return
+    }
+  }
 
   // ============================================================
   // Flow runner dispatch.

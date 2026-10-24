@@ -16,6 +16,7 @@ import {
 import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity'
 import { assertConversationInAccount } from '@/lib/whatsapp/conversation-scope'
 import { supabaseAdmin } from './admin-client'
+import { assertCanSendAutomated } from '@/lib/oralink/consent'
 import { getT } from '@/lib/i18n/translate'
 
 const t = getT('LibErrors')
@@ -93,6 +94,9 @@ export async function engineSendText(
   args: SendTextEngineArgs,
 ): Promise<{ whatsapp_message_id: string }> {
   const db = supabaseAdmin()
+  // OraLink: single outbound consent guard (CONTRACTS §5). Throws
+  // ConsentBlockedError before any Meta call when the contact said STOP.
+  await assertCanSendAutomated(args.accountId, args.contactId, db)
 
   const { data: contact, error: contactErr } = await db
     .from('contacts')
@@ -207,6 +211,9 @@ export async function engineSendMedia(
   args: SendMediaEngineArgs,
 ): Promise<{ whatsapp_message_id: string }> {
   const db = supabaseAdmin()
+  // OraLink: single outbound consent guard (CONTRACTS §5). Throws
+  // ConsentBlockedError before any Meta call when the contact said STOP.
+  await assertCanSendAutomated(args.accountId, args.contactId, db)
 
   const { data: contact, error: contactErr } = await db
     .from('contacts')
@@ -360,6 +367,9 @@ async function sendInteractiveViaMeta(
   input: SendInput,
 ): Promise<{ whatsapp_message_id: string }> {
   const db = supabaseAdmin()
+  // OraLink: single outbound consent guard (CONTRACTS §5). Throws
+  // ConsentBlockedError before any Meta call when the contact said STOP.
+  await assertCanSendAutomated(input.accountId, input.contactId, db)
 
   // Scope the contact + whatsapp_config lookups by account_id —
   // same defense-in-depth rationale as automations/meta-send.ts.
