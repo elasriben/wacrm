@@ -14,6 +14,7 @@
 // docs/oralink/sendzen/contract.md (W-01…W-04).
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
+import { existsSync } from 'node:fs'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type Row = Record<string, unknown>
@@ -23,6 +24,7 @@ type Result = { data: unknown; error: DbError; count?: number | null }
 const h = vi.hoisted(() => ({
   tables: {} as Record<string, Record<string, unknown>[]>,
   queryErrors: [] as string[],
+  consentReadError: false,
   afterCallbacks: [] as (() => Promise<void> | void)[],
   rpcCalls: [] as { name: string; args: Record<string, unknown> }[],
   automations: [] as unknown[],
@@ -75,6 +77,7 @@ const uniqueError = (name: string): DbError => ({ code: '23505', message: `dupli
 const SELECT_COLUMNS: Record<string, string[]> = {
   whatsapp_config: ['id', 'verify_token', 'account_id', 'phone_number_id', 'access_token', 'mirror_inbound_media'],
   contacts: ['id', 'phone', 'wa_user_id', 'name', 'custom_fields', 'account_id'],
+  contact_consent_current: ['purpose', 'status', 'contact_id'],
   conversations: ['id', 'contact_id', 'account_id', 'status'],
   messages: ['id', 'message_id', 'conversation_id'],
   flows: ['id'], flow_nodes: ['id'], flow_runs: ['id'], flow_run_events: ['id'],
@@ -92,8 +95,63 @@ function projection(table: string, columns: string) {
   return (row: Row) => Object.fromEntries(names.map((c) => c === 'broadcasts!inner(account_id)' ? ['broadcasts', structuredClone(row.broadcasts)] : [c, structuredClone(row[c] ?? null)]))
 }
 
+// Migration 900: latest journal row per complete tuple, BEFORE PostgREST filters.
+function consentTimestamp(value: unknown): bigint {
+  const m = typeof value === 'string' && /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?Z$/.exec(value)
+  if (!m) queryContractError('invalid consent timestamp fixture')
+  const seconds = Date.parse(`${m[1]}Z`)
+  if (!Number.isFinite(seconds) || new Date(seconds).toISOString().slice(0, 19) !== m[1]) queryContractError('invalid consent timestamp fixture')
+  return BigInt(seconds) * BigInt(1000) + BigInt((m[2] ?? '').padEnd(6, '0'))
+}
+function consentSequence(value: unknown): bigint {
+  const text = typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : typeof value === 'string' ? value : ''
+  if (!/^[1-9]\d*$/.test(text) || BigInt(text) > BigInt('9223372036854775807')) queryContractError('invalid consent sequence fixture')
+  return BigInt(text)
+}
+function currentConsentRows(): Row[] {
+  const journal = h.tables.contact_consents
+  if (!Array.isArray(journal)) queryContractError('consent journal fixture required')
+  if (Object.hasOwn(h.tables, 'contact_consent_current')) queryContractError('consent view must be derived, not seeded')
+  const latest = new Map<string, { row: Row; time: bigint; seq: bigint }>()
+  const ids = new Set<string>()
+  for (const row of journal) {
+    if (typeof row.id !== 'string' || !row.id || ids.has(row.id) || typeof row.account_id !== 'string' || !row.account_id || typeof row.contact_id !== 'string' || !row.contact_id || row.channel !== 'whatsapp' || typeof row.purpose !== 'string' || !['service', 'marketing'].includes(row.purpose) || typeof row.status !== 'string' || !['granted', 'revoked'].includes(row.status)) queryContractError('invalid consent journal fixture')
+    if (!(h.tables.contacts ?? []).some((c) => c.id === row.contact_id && c.account_id === row.account_id)) queryContractError('consent contact/account fixture mismatch')
+    if (typeof row.source !== 'string' || (!['inbound', 'manual', 'import'].includes(row.source) && !/^OL-[A-Z0-9]{2,8}-[A-Z0-9]{2,16}$/.test(row.source)) || (row.evidence != null && (typeof row.evidence !== 'string' || [...row.evidence].length > 200))) queryContractError('invalid consent evidence/source fixture')
+    ids.add(row.id)
+    const time = consentTimestamp(row.recorded_at); const seq = consentSequence(row.seq)
+    const key = JSON.stringify([row.account_id, row.contact_id, row.channel, row.purpose])
+    const previous = latest.get(key)
+    if (previous && time === previous.time && seq === previous.seq) queryContractError('ambiguous consent ordering fixture')
+    if (!previous || time > previous.time || (time === previous.time && seq > previous.seq)) latest.set(key, { row, time, seq })
+  }
+  return [...latest.values()].sort((a, b) => {
+    for (const column of ['account_id', 'contact_id', 'channel', 'purpose']) {
+      if (a.row[column] !== b.row[column]) return String(a.row[column]) < String(b.row[column]) ? -1 : 1
+    }
+    return 0
+  }).map(({ row }) => ({
+    account_id: row.account_id, contact_id: row.contact_id, channel: row.channel,
+    purpose: row.purpose, status: row.status, source: row.source, evidence: row.evidence ?? null,
+    recorded_at: row.recorded_at, recorded_by: row.recorded_by ?? null, consent_id: row.id,
+  }))
+}
+type QueryFilter = { op: string; column: string; value: unknown }
+function consentQuery(columns: string, filters: QueryFilter[]) {
+  const eq = (column: string, value?: unknown) => filters.some((f) => f.op === 'eq' && f.column === column && (value === undefined ? typeof f.value === 'string' && Boolean(f.value) : f.value === value))
+  const shape = filters.map((f) => `${f.op}:${f.column}`).sort().join(',')
+  if (columns === 'purpose,status' && shape === 'eq:account_id,eq:channel,eq:contact_id' && eq('account_id') && eq('contact_id') && eq('channel', 'whatsapp')) return
+  const batch = filters.find((f) => f.op === 'in' && f.column === 'contact_id')
+  if (columns === 'contact_id' && shape === 'eq:account_id,eq:channel,eq:status,in:contact_id' && eq('account_id') && eq('channel', 'whatsapp') && eq('status', 'revoked') && Array.isArray(batch?.value) && batch.value.every((v) => typeof v === 'string' && Boolean(v))) return
+  queryContractError('unsupported or unscoped consent view query')
+}
+
 function from(table: string) {
-  const rows = (h.tables[table] ??= [])
+  const consentView = table === 'contact_consent_current'
+  const rows = consentView ? [] : (h.tables[table] ??= [])
+  const queryFilters: QueryFilter[] = []
+  let columns = ''
+  const addFilter = (op: string, column: string, value: unknown, predicate: (r: Row) => boolean) => { queryFilters.push({ op, column, value }); filters.push(predicate) }
   const filters: ((r: Row) => boolean)[] = []
   let op: 'select' | 'update' | 'insert' | 'upsert' | 'delete' = 'select'
   let patch: Row = {}
@@ -108,6 +166,16 @@ function from(table: string) {
   const output = (list: Row[]) => head ? null : list.map(project)
 
   const execute = (): Result => {
+    for (const f of queryFilters) {
+      if (f.column.includes('.') && !(table === 'broadcast_recipients' && f.column === 'broadcasts.account_id' && f.op === 'eq' && innerBroadcast && op === 'select')) queryContractError('unsupported relation filter: inner broadcast join required')
+    }
+    if (consentView) {
+      if (op !== 'select' || !returning || head || order || limit !== null) queryContractError('unsupported consent view operation')
+      consentQuery(columns, queryFilters)
+      if (h.consentReadError) return { data: null, error: { code: 'XX000', message: 'simulated consent read failure' } }
+      const current = currentConsentRows()
+      return { data: output(current.filter((r) => filters.every((f) => f(r)))), error: null }
+    }
     if (op === 'insert' || op === 'upsert') {
       if (op === 'upsert' && (table !== 'messages' || upsertOpts.onConflict !== 'conversation_id,message_id' || upsertOpts.ignoreDuplicates !== true)) queryContractError('unsupported onConflict/upsert contract')
       const out: Row[] = []
@@ -152,12 +220,12 @@ function from(table: string) {
   }
 
   const b = {
-    select: (cols = '*', opts?: { head?: boolean }) => { project = projection(table, cols); innerBroadcast = cols.split(',').map((c) => c.trim()).includes('broadcasts!inner(account_id)'); returning = true; if (opts?.head) head = true; return b },
-    eq: (c: string, v: unknown) => { filters.push((r) => readColumn(r, c) === v); return b },
-    neq: (c: string, v: unknown) => { filters.push((r) => readColumn(r, c) !== v); return b },
-    is: (c: string, v: unknown) => { filters.push((r) => (readColumn(r, c) ?? null) === v); return b },
-    in: (c: string, vs: unknown[]) => { filters.push((r) => vs.includes(readColumn(r, c))); return b },
-    filter: (c: string, operator: string, v: unknown) => { if (operator === 'eq') filters.push((r) => readColumn(r, c) === v); return b },
+    select: (cols = '*', opts?: { head?: boolean }) => { if (consentView && (opts || !['purpose,status', 'contact_id'].includes(cols.replace(/\s/g, '')))) queryContractError('unsupported consent view projection'); columns = cols.replace(/\s/g, ''); project = projection(table, cols); innerBroadcast = cols.split(',').map((c) => c.trim()).includes('broadcasts!inner(account_id)'); returning = true; if (opts?.head) head = true; return b },
+    eq: (c: string, v: unknown) => { addFilter('eq', c, v, (r) => readColumn(r, c) === v); return b },
+    neq: (c: string, v: unknown) => { addFilter('neq', c, v, (r) => readColumn(r, c) !== v); return b },
+    is: (c: string, v: unknown) => { addFilter('is', c, v, (r) => (readColumn(r, c) ?? null) === v); return b },
+    in: (c: string, vs: unknown[]) => { addFilter('in', c, vs, (r) => vs.includes(readColumn(r, c))); return b },
+    filter: (c: string, operator: string, v: unknown) => { if (operator !== 'eq') queryContractError('unsupported filter operator'); addFilter('filter:eq', c, v, (r) => readColumn(r, c) === v); return b },
     order: (col: string, o?: { ascending?: boolean }) => { order = { col, asc: o?.ascending !== false }; return b },
     limit: (n: number) => { limit = n; return b },
     update: (v: Row) => { op = 'update'; patch = v; return b },
@@ -267,6 +335,7 @@ afterAll(async () => {
 // Two accounts (TranZit, Immerview), each with its own number, SendZen key and keyword flow.
 function seed() {
   h.tables = {
+    contact_consents: [],
     whatsapp_config: [
       { id: 'cfg-tz', account_id: 'acc-tz', user_id: 'user-tz', phone_number_id: PNID_TZ, access_token: encrypt(KEY_TZ), mirror_inbound_media: false },
       { id: 'cfg-im', account_id: 'acc-im', user_id: 'user-im', phone_number_id: PNID_IM, access_token: encrypt(KEY_IM), mirror_inbound_media: false },
@@ -302,6 +371,7 @@ function seed() {
 
 beforeEach(() => {
   h.queryErrors = []
+  h.consentReadError = false
   seed()
   h.afterCallbacks = []
   h.rpcCalls = []
@@ -589,5 +659,162 @@ describe('Supabase fake query contract', () => {
     expect(Object.keys((first.data as Row[])[0])).toEqual(['id'])
     expect((await from('messages').upsert(row, opts).select('id')).data).toEqual([])
     expect((await from('messages').insert({ message_id: 'other' })).data).toBeNull()
+  })
+})
+
+// STRICT cases are additional to the 74 original P0 + PR9 targeted tests.
+describe('STRICT broadcast filter contract', () => {
+  it('rejects account filters without the selected inner join, including empty data and reversed builder order', async () => {
+    for (const query of [
+      from('broadcast_recipients').select('id').eq('broadcasts.account_id', 'one'),
+      from('broadcast_recipients').eq('broadcasts.account_id', 'one').select('id'),
+      from('broadcast_recipients').select('id, broadcasts!inner(account_id)').eq('broadcasts.account_id', 'one').select('id'),
+      from('broadcast_recipients').select('id, broadcasts!inner(account_id)').neq('broadcasts.account_id', 'one'),
+      from('messages').select('id').eq('broadcasts.account_id', 'one'),
+    ]) {
+      await expect(Promise.resolve(query)).rejects.toThrow(/inner broadcast join/)
+      expect(h.queryErrors.splice(0)).toHaveLength(1)
+    }
+  })
+})
+
+const consentFixture = (journal: Row[] = []) => {
+  h.tables.contacts = [
+    { id: 'c-one', account_id: 'a-one' }, { id: 'c-two', account_id: 'a-one' }, { id: 'c-other', account_id: 'a-other' },
+  ]
+  h.tables.contact_consents = journal
+}
+const consentEvent = (seq: number | string, status = 'granted', overrides: Row = {}): Row => ({
+  id: `consent-${seq}`, seq, account_id: 'a-one', contact_id: 'c-one', channel: 'whatsapp',
+  purpose: 'service', status, source: 'inbound', recorded_at: '2026-10-21T10:00:00.000000Z', ...overrides,
+})
+const consentStateQuery = () => from('contact_consent_current').select('purpose, status').eq('account_id', 'a-one').eq('contact_id', 'c-one').eq('channel', 'whatsapp')
+const consentBatchQuery = () => from('contact_consent_current').select('contact_id').eq('account_id', 'a-one').eq('channel', 'whatsapp').eq('status', 'revoked').in('contact_id', ['c-one', 'c-two'])
+
+describe('STRICT consent view contract', () => {
+  it('derives an empty view from an explicit empty journal, returning only requested columns', async () => {
+    consentFixture()
+    expect((await consentStateQuery()).data).toEqual([])
+    h.tables.contact_consents.push(consentEvent(1))
+    expect((await consentStateQuery()).data).toEqual([{ purpose: 'service', status: 'granted' }])
+    expect(h.tables).not.toHaveProperty('contact_consent_current')
+  })
+  it('chooses the latest event before filtering revoked rows, not the first matching journal event', async () => {
+    consentFixture([consentEvent(1, 'revoked'), consentEvent(2, 'granted')])
+    expect((await consentStateQuery()).data).toEqual([{ purpose: 'service', status: 'granted' }])
+    expect((await consentBatchQuery()).data).toEqual([])
+    h.tables.contact_consents.push(consentEvent(3, 'revoked'))
+    expect((await consentStateQuery()).data).toEqual([{ purpose: 'service', status: 'revoked' }])
+    expect((await consentBatchQuery()).data).toEqual([{ contact_id: 'c-one' }])
+  })
+  it('orders tied timestamps by numeric BIGINT seq, not fixture order or lexicographic order', async () => {
+    consentFixture([consentEvent('10', 'granted'), consentEvent('9', 'revoked')])
+    expect((await consentStateQuery()).data).toEqual([{ purpose: 'service', status: 'granted' }])
+    consentFixture([consentEvent('9007199254740993', 'revoked'), consentEvent('9007199254740992', 'granted')])
+    expect((await consentStateQuery()).data).toEqual([{ purpose: 'service', status: 'revoked' }])
+  })
+  it('preserves timestamp microseconds and gives timestamp priority over seq', async () => {
+    consentFixture([
+      consentEvent(9, 'revoked', { recorded_at: '2026-10-21T10:00:00.000001Z' }),
+      consentEvent(1, 'granted', { recorded_at: '2026-10-21T10:00:00.000002Z' }),
+    ])
+    expect((await consentStateQuery()).data).toEqual([{ purpose: 'service', status: 'granted' }])
+  })
+  it('keeps purposes, contacts and accounts separate and projects only the scoped state', async () => {
+    consentFixture([
+      consentEvent(1), consentEvent(2, 'revoked', { purpose: 'marketing' }),
+      consentEvent(3, 'revoked', { contact_id: 'c-two' }),
+      consentEvent(4, 'revoked', { account_id: 'a-other', contact_id: 'c-other' }),
+    ])
+    expect((await consentStateQuery()).data).toEqual([{ purpose: 'marketing', status: 'revoked' }, { purpose: 'service', status: 'granted' }])
+    expect((await consentBatchQuery()).data).toEqual([{ contact_id: 'c-one' }, { contact_id: 'c-two' }])
+  })
+  it('recomputes the view at execution instead of caching a seeded view or builder snapshot', async () => {
+    consentFixture([consentEvent(1)])
+    const query = consentStateQuery()
+    h.tables.contact_consents.push(consentEvent(2, 'revoked'))
+    expect((await query).data).toEqual([{ purpose: 'service', status: 'revoked' }])
+    h.tables.contact_consent_current = []
+    await expect(Promise.resolve(consentStateQuery())).rejects.toThrow(/derived/)
+    expect(h.queryErrors.splice(0)).toHaveLength(1)
+  })
+  it('rejects omitted or incorrect scope, duplicate filters and unsupported operators', async () => {
+    consentFixture()
+    for (const query of [
+      from('contact_consent_current').select('purpose, status').eq('contact_id', 'c-one').eq('channel', 'whatsapp'),
+      from('contact_consent_current').select('purpose, status').eq('account_id', 'a-one').eq('channel', 'whatsapp'),
+      from('contact_consent_current').select('purpose, status').eq('account_id', 'a-one').eq('contact_id', 'c-one'),
+      from('contact_consent_current').select('purpose, status').eq('account_id', 'a-one').eq('contact_id', 'c-one').eq('channel', 'sms'),
+      consentStateQuery().eq('status', 'granted'), consentStateQuery().eq('account_id', 'a-one'),
+      from('contact_consent_current').select('purpose, status').filter('account_id', 'eq', 'a-one').eq('contact_id', 'c-one').eq('channel', 'whatsapp'),
+      consentStateQuery().in('unknown', []),
+    ]) {
+      await expect(Promise.resolve(query)).rejects.toThrow(/consent view query/)
+      expect(h.queryErrors.splice(0)).toHaveLength(1)
+    }
+    expect(() => from('contact_consent_current').filter('account_id', 'like', '%')).toThrow(/operator/)
+    expect(h.queryErrors.splice(0)).toHaveLength(1)
+  })
+  it('rejects wildcard, unknown projections and unsupported query modifiers even on an empty journal', async () => {
+    consentFixture()
+    for (const columns of ['*', 'unknown', 'purpose, status, evidence', 'purpose, status,', 'contacts(*)']) {
+      expect(() => from('contact_consent_current').select(columns)).toThrow(/projection/)
+      expect(h.queryErrors.splice(0)).toHaveLength(1)
+    }
+    for (const query of [consentStateQuery().limit(1), consentStateQuery().order('recorded_at'), from('contact_consent_current')]) {
+      await expect(Promise.resolve(query)).rejects.toThrow(/operation/)
+      expect(h.queryErrors.splice(0)).toHaveLength(1)
+    }
+  })
+  it('refuses mutations of the view without altering the journal', async () => {
+    consentFixture([consentEvent(1)])
+    const before = structuredClone(h.tables.contact_consents)
+    for (const query of [from('contact_consent_current').insert({}), from('contact_consent_current').update({}), from('contact_consent_current').upsert({}), from('contact_consent_current').delete()]) {
+      await expect(Promise.resolve(query)).rejects.toThrow(/operation/)
+      expect(h.queryErrors.splice(0)).toHaveLength(1)
+    }
+    expect(h.tables.contact_consents).toEqual(before)
+  })
+  it('rejects invalid journal fixtures instead of returning a misleading empty state', async () => {
+    for (const patch of [
+      { account_id: 'wrong-account' }, { channel: 'sms' }, { purpose: 'unknown' }, { purpose: ['service'] }, { status: 'unknown' }, { status: ['granted'] },
+      { source: 'unknown' }, { evidence: 'x'.repeat(201) }, { seq: 0 }, { seq: Number.MAX_SAFE_INTEGER + 1 },
+      { seq: '9223372036854775808' }, { recorded_at: 'invalid' }, { recorded_at: '2026-02-30T10:00:00Z' },
+    ]) {
+      consentFixture([consentEvent(1, 'granted', patch)])
+      await expect(Promise.resolve(consentStateQuery())).rejects.toThrow(/fixture/)
+      expect(h.queryErrors.splice(0)).toHaveLength(1)
+    }
+    delete h.tables.contact_consents
+    await expect(Promise.resolve(consentStateQuery())).rejects.toThrow(/fixture required/)
+    expect(h.queryErrors.splice(0)).toHaveLength(1)
+  })
+  it('returns an injected database error explicitly rather than a successful empty result', async () => {
+    consentFixture()
+    h.consentReadError = true
+    expect(await consentStateQuery()).toEqual({ data: null, error: { code: 'XX000', message: 'simulated consent read failure' } })
+  })
+
+  // This branch contains no production CRM code. These integration cases run when validating with PR9.
+  const withPr9 = it.runIf(existsSync(resolve(process.cwd(), 'src/lib/oralink/consent.ts')))
+  const realGuard = () => vi.importActual<{ canSendAutomated: (account: string, contact: string) => Promise<boolean> }>('@/lib/oralink/consent')
+  withPr9('calls the REAL consent guard: STOP blocks, START restores, and another purpose can still block', async () => {
+    const { canSendAutomated } = await realGuard()
+    consentFixture()
+    expect(await canSendAutomated('a-one', 'c-one')).toBe(true)
+    h.tables.contact_consents.push(consentEvent(1, 'revoked'))
+    expect(await canSendAutomated('a-one', 'c-one')).toBe(false)
+    h.tables.contact_consents.push(consentEvent(2, 'granted'))
+    expect(await canSendAutomated('a-one', 'c-one')).toBe(true)
+    h.tables.contact_consents.push(consentEvent(3, 'revoked', { purpose: 'marketing' }))
+    expect(await canSendAutomated('a-one', 'c-one')).toBe(false)
+    expect(await canSendAutomated('a-one', 'c-two')).toBe(true)
+  })
+  withPr9('keeps the REAL consent guard fail-closed on database errors without a bypass', async () => {
+    const { canSendAutomated } = await realGuard()
+    consentFixture()
+    h.consentReadError = true
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try { expect(await canSendAutomated('a-one', 'c-one')).toBe(false) } finally { log.mockRestore() }
   })
 })
