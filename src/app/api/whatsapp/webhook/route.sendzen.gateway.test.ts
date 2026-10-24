@@ -14,7 +14,7 @@
 // docs/oralink/sendzen/contract.md (W-01…W-04).
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type Row = Record<string, unknown>
 type DbError = { code: string; message: string } | null
@@ -22,6 +22,7 @@ type Result = { data: unknown; error: DbError; count?: number | null }
 
 const h = vi.hoisted(() => ({
   tables: {} as Record<string, Record<string, unknown>[]>,
+  queryErrors: [] as string[],
   afterCallbacks: [] as (() => Promise<void> | void)[],
   rpcCalls: [] as { name: string; args: Record<string, unknown> }[],
   automations: [] as unknown[],
@@ -47,6 +48,7 @@ let idSeq = 0
 let clock = Date.parse('2026-10-21T10:00:00Z')
 
 function readColumn(row: Row, column: string): unknown {
+  if (column.includes('.')) { const [relation, field] = column.split('.'); return (row[relation] as Row | undefined)?.[field] }
   const [base, jsonKey] = column.split('->>')
   if (jsonKey === undefined) return row[base]
   return (row[base] as Row | null | undefined)?.[jsonKey] ?? null
@@ -69,6 +71,27 @@ function conflicts(table: string, candidate: Row, rows: Row[]): string | null {
 }
 const uniqueError = (name: string): DbError => ({ code: '23505', message: `duplicate key value violates unique constraint "${name}"` })
 
+// Deliberately narrow contract, not a PostgREST emulator. Unsupported syntax must fail.
+const SELECT_COLUMNS: Record<string, string[]> = {
+  whatsapp_config: ['id', 'verify_token', 'account_id', 'phone_number_id', 'access_token', 'mirror_inbound_media'],
+  contacts: ['id', 'phone', 'wa_user_id', 'name', 'custom_fields', 'account_id'],
+  conversations: ['id', 'contact_id', 'account_id', 'status'],
+  messages: ['id', 'message_id', 'conversation_id'],
+  flows: ['id'], flow_nodes: ['id'], flow_runs: ['id'], flow_run_events: ['id'],
+  contact_tags: ['contact_id'], broadcast_recipients: ['id', 'status', 'sent_at', 'broadcasts!inner(account_id)'],
+}
+function queryContractError(message: string): never {
+  h.queryErrors.push(message)
+  throw new Error(message)
+}
+function projection(table: string, columns: string) {
+  if (!Object.hasOwn(SELECT_COLUMNS, table)) queryContractError(`unsupported select table: ${table}`)
+  if (columns === '*') return (row: Row) => structuredClone(row)
+  const names = columns.split(',').map((c) => c.trim())
+  if (!names.length || names.some((c) => !SELECT_COLUMNS[table].includes(c))) queryContractError(`unsupported select projection: ${table}.${columns}`)
+  return (row: Row) => Object.fromEntries(names.map((c) => c === 'broadcasts!inner(account_id)' ? ['broadcasts', structuredClone(row.broadcasts)] : [c, structuredClone(row[c] ?? null)]))
+}
+
 function from(table: string) {
   const rows = (h.tables[table] ??= [])
   const filters: ((r: Row) => boolean)[] = []
@@ -79,9 +102,14 @@ function from(table: string) {
   let limit: number | null = null
   let order: { col: string; asc: boolean } | null = null
   let head = false
+  let project = projection(table, '*')
+  let returning = false
+  let innerBroadcast = false
+  const output = (list: Row[]) => head ? null : list.map(project)
 
   const execute = (): Result => {
     if (op === 'insert' || op === 'upsert') {
+      if (op === 'upsert' && (table !== 'messages' || upsertOpts.onConflict !== 'conversation_id,message_id' || upsertOpts.ignoreDuplicates !== true)) queryContractError('unsupported onConflict/upsert contract')
       const out: Row[] = []
       for (const v of pending) {
         const row = withDefaults(table, v)
@@ -93,9 +121,14 @@ function from(table: string) {
         rows.push(row)
         out.push(structuredClone(row))
       }
-      return { data: out, error: null }
+      return { data: returning ? output(out) : null, error: null }
     }
-    const matched = rows.filter((r) => filters.every((f) => f(r)))
+    // The only embedded relation exercised here is the FK broadcast_id -> broadcasts.id.
+    const source: Row[] = innerBroadcast ? rows.flatMap((r) => {
+      const parent = (h.tables.broadcasts ?? []).find((b) => b.id === r.broadcast_id)
+      return parent ? [{ ...r, broadcasts: { account_id: parent.account_id } }] : []
+    }) : rows
+    const matched = source.filter((r) => filters.every((f) => f(r)))
     if (op === 'update') {
       for (const r of matched) {
         const before = { ...r }
@@ -103,7 +136,7 @@ function from(table: string) {
         const clash = conflicts(table, r, rows)
         if (clash) { Object.assign(r, before); return { data: null, error: uniqueError(clash) } }
       }
-      return { data: matched.map((r) => structuredClone(r)), error: null }
+      return { data: returning ? output(matched) : null, error: null }
     }
     if (op === 'delete') {
       h.tables[table] = rows.filter((r) => !matched.includes(r))
@@ -115,11 +148,11 @@ function from(table: string) {
       list = [...list].sort((a, b) => (String(a[col]) < String(b[col]) ? -1 : String(a[col]) > String(b[col]) ? 1 : 0) * (asc ? 1 : -1))
     }
     if (limit !== null) list = list.slice(0, limit)
-    return { data: head ? null : list.map((r) => structuredClone(r)), error: null, count: matched.length }
+    return { data: output(list), error: null, count: matched.length }
   }
 
   const b = {
-    select: (_cols?: string, opts?: { head?: boolean }) => { if (opts?.head) head = true; return b },
+    select: (cols = '*', opts?: { head?: boolean }) => { project = projection(table, cols); innerBroadcast = cols.split(',').map((c) => c.trim()).includes('broadcasts!inner(account_id)'); returning = true; if (opts?.head) head = true; return b },
     eq: (c: string, v: unknown) => { filters.push((r) => readColumn(r, c) === v); return b },
     neq: (c: string, v: unknown) => { filters.push((r) => readColumn(r, c) !== v); return b },
     is: (c: string, v: unknown) => { filters.push((r) => (readColumn(r, c) ?? null) === v); return b },
@@ -268,6 +301,7 @@ function seed() {
 }
 
 beforeEach(() => {
+  h.queryErrors = []
   seed()
   h.afterCallbacks = []
   h.rpcCalls = []
@@ -277,6 +311,9 @@ beforeEach(() => {
   mock.calls.length = 0
   mockSeq = 0
 })
+
+// Application code may catch query errors: the test must still fail on an unsupported request.
+afterEach(() => { expect(h.queryErrors).toEqual([]) })
 
 const rows = (t: string, where: Row = {}) => (h.tables[t] ?? []).filter((r) => Object.entries(where).every(([k, v]) => r[k] === v))
 
@@ -507,5 +544,50 @@ describe('MAQUETTE — W-03 end to end (local): QR keyword OL-TZ-BF1 → flow �
     const [err] = rows('flow_run_events', { flow_run_id: run.id, event_type: 'error' })
     expect(String((err.payload as Row).detail)).toMatch(/Unknown phone number id for this gateway/)
     expect(rows('messages', { sender_type: 'bot' })).toHaveLength(0)
+  })
+})
+
+// Negative contract tests: these must fail if the fake stops enforcing queries.
+describe('Supabase fake query contract', () => {
+  it('projects only requested columns and rejects unknown/unsupported projections even with no rows', async () => {
+    const result = await from('contacts').insert({ phone: '123', account_id: 'a', name: 'hidden' }).select('id')
+    expect(Object.keys((result.data as Row[])[0])).toEqual(['id'])
+    expect(() => from('contacts').select('nonexistent')).toThrow(/projection/)
+    expect(() => from('messages').select('contacts(*)')).toThrow(/projection/)
+    expect(() => from('messages').select('id,,')).toThrow(/projection/)
+    expect(h.queryErrors.splice(0)).toHaveLength(3)
+  })
+  it('rejects wrong or omitted conflict targets and unsupported merge semantics', async () => {
+    for (const opts of [undefined, { onConflict: 'message_id', ignoreDuplicates: true }, { onConflict: 'conversation_id,message_id', ignoreDuplicates: false }]) {
+      await expect(Promise.resolve(from('messages').upsert({ message_id: 'x' }, opts))).rejects.toThrow(/onConflict/)
+    }
+    expect(h.tables.messages ?? []).toHaveLength(0)
+    expect(h.queryErrors.splice(0)).toHaveLength(3)
+  })
+  it('enforces the inner broadcast join, account filter and embedded projection', async () => {
+    h.tables.broadcasts = [{ id: 'a', account_id: 'one' }, { id: 'b', account_id: 'two' }]
+    h.tables.broadcast_recipients = [
+      { id: 'ra', broadcast_id: 'a', status: 'sent', sent_at: 'now', secret: 'hidden' },
+      { id: 'rb', broadcast_id: 'b', status: 'sent' },
+      { id: 'orphan', broadcast_id: 'missing', status: 'sent' },
+    ]
+    const result = await from('broadcast_recipients').select('id, status, sent_at, broadcasts!inner(account_id)').eq('broadcasts.account_id', 'one')
+    expect(result.data).toEqual([{ id: 'ra', status: 'sent', sent_at: 'now', broadcasts: { account_id: 'one' } }])
+    const all = await from('broadcast_recipients').select('id, broadcasts!inner(account_id)')
+    expect((all.data as Row[]).map((r) => r.id)).toEqual(['ra', 'rb'])
+    expect(() => from('broadcast_recipients').select('broadcasts!inner(nonexistent)')).toThrow(/projection/)
+    expect(h.queryErrors.splice(0)).toHaveLength(1)
+  })
+  it('records contract violations even when a caller catches the exception', () => {
+    try { from('messages').select('nonexistent') } catch { /* simulate swallowed application error */ }
+    expect(h.queryErrors.splice(0)).toEqual(['unsupported select projection: messages.nonexistent'])
+  })
+  it('does not treat a conflicting insert as a returned new message or leak unselected fields', async () => {
+    const row = { conversation_id: 'c', message_id: 'm', content_text: 'hidden' }
+    const opts = { onConflict: 'conversation_id,message_id', ignoreDuplicates: true }
+    const first = await from('messages').upsert(row, opts).select('id')
+    expect(Object.keys((first.data as Row[])[0])).toEqual(['id'])
+    expect((await from('messages').upsert(row, opts).select('id')).data).toEqual([])
+    expect((await from('messages').insert({ message_id: 'other' })).data).toBeNull()
   })
 })

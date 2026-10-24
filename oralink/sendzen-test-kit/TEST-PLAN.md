@@ -46,3 +46,37 @@ activer (`ALLOW_TYPES`), et la décision finale **X / Z′ / Z-code** pour les n
 ## Tests déjà faits (sans SendZen)
 - Côté waCRM : si SendZen signe comme annoncé, le vérificateur existant l'accepte (plusieurs secrets possibles), et rejette signature fausse, corps altéré, préfixe erroné, hexadécimal nu (`webhook-signature.sendzen-compat.test.ts`).
 - Côté kit : reconnaissance de la signature (hex/base64), extraction boutons/liste/STOP, détection des doublons et intervalles, garde-fous d'envoi et de rejeu (`npm test` dans ce dossier).
+
+## Protections P0 du kit (tests locaux simulés)
+
+- Le rejeu accepte uniquement le chemin `/api/whatsapp/webhook`, sans credentials, fragment ni query.
+  Par défaut : `127.0.0.1`, `[::1]` et `localhost` exact (réécrit vers `127.0.0.1`, sans DNS).
+  Les écritures IP abrégées, octales, hexadécimales, encodées, IPv4-mapped et les faux suffixes locaux sont refusés.
+- Une destination privée IPv4 peut être autorisée individuellement :
+  `--allow-host 192.168.1.20 --url http://192.168.1.20:3000/api/whatsapp/webhook`.
+  Seules les plages RFC1918 sont éligibles ; pas de métadonnées link-local, de nom DNS, d'IP publique,
+  ni de dérogation globale `--allow-remote`. L'opérateur doit contrôler le service et sa base jetable.
+  Les requêtes HTTP privées ne chiffrent pas les captures : préférer loopback ou HTTPS sur réseau partagé.
+- Toutes les redirections sont refusées, même vers une destination autrement autorisée. Délai de 10 secondes
+  par requête ; un statut non-2xx échoue. Cela n'annule pas les requêtes déjà acceptées avant une erreur ultérieure.
+- Tout le JSONL est validé avant le premier envoi : fichier non vide et UTF-8 strict, records avec corps
+  non vide et événements valides. Aucun record invalide n'est éliminé silencieusement. Limites : corps 1 Mo,
+  fichier 16 Mo ; réception limitée à 1 000 captures et 16 Mo par processus. Les lignes blanches sont permises.
+- Les nouvelles captures ajoutent `rawBodyBase64`, représentation canonique des octets reçus. `rawBody` reste
+  disponible pour l'UTF-8 valide et vaut `null` sinon. Les deux représentations doivent concorder lorsqu'elles
+  sont présentes. Les anciennes captures avec `rawBody` UTF-8 valide restent lisibles ; des octets déjà perdus
+  dans une ancienne capture ne peuvent pas être reconstruits.
+- Les HMAC sont calculés sur les octets, y compris pour les hypothèses de signatures horodatées. UTF-8 invalide,
+  JSON invalide ou événements inconnus restent capturables pour diagnostic ; ils ne prouvent pas un contrat SendZen.
+  Le récepteur de test conserve sa réponse 200 (ou `FAIL_NEXT`) ; un échec d'écriture retourne 500, un dépassement 413.
+- Aucun nom DNS distant n'est autorisé : aucun risque de rebinding DNS dans la politique actuelle. Une future
+  autorisation de noms non locaux exigerait résolution et connexion épinglées, contrôle de toutes les adresses,
+  refus des plages sensibles et réévaluation des proxies ; une simple liste de noms serait insuffisante.
+- Le simulateur Supabase de `route.sendzen.gateway.test.ts` applique les projections simples, la jointure FK `broadcasts!inner(account_id)` avec son filtre de compte, et le seul upsert
+  exercé (`messages`, cible `conversation_id,message_id`, `ignoreDuplicates: true`). Les projections ou formes
+  non prises en charge lèvent une erreur et font échouer le test même si l'application les intercepte. Il ne simule ni Postgres/RLS ni tout PostgREST : une extension doit
+  définir son contrat et ses cas négatifs, sans accepter silencieusement une requête inconnue.
+
+Validation : `npm test` dans ce dossier et dans `../sendzen-gateway`, puis Vitest ciblé du webhook et des
+modules SendZen depuis la racine. Toutes les signatures et tous les services des tests sont des maquettes ;
+aucun appel réel SendZen/Meta n'est nécessaire ni effectué.

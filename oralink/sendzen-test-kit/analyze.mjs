@@ -32,13 +32,13 @@ export function checkSignatures(headers, rawBody, secrets) {
         'sha1=<hex>': `sha1=${crypto.createHmac('sha1', secrets[i]).update(rawBody).digest('hex')}`,
       }
       if (tsHeader) {
-        const signed = `${tsHeader[1]}.${rawBody}`
+        const signed = Buffer.concat([Buffer.from(`${tsHeader[1]}.`), Buffer.from(rawBody)])
         forms[`<hex> of "<${tsHeader[0]}>.<body>"`] = h256(signed, 'hex')
         forms[`sha256=<hex> of "<${tsHeader[0]}>.<body>"`] = `sha256=${h256(signed, 'hex')}`
         forms[`<base64> of "<${tsHeader[0]}>.<body>"`] = h256(signed, 'base64')
       }
       const stripe = /^t=(\d+),v1=([0-9a-f]+)$/.exec(value)
-      if (stripe) forms['t=<ts>,v1=<hex> of "<ts>.<body>"'] = `t=${stripe[1]},v1=${h256(`${stripe[1]}.${rawBody}`, 'hex')}`
+      if (stripe) forms['t=<ts>,v1=<hex> of "<ts>.<body>"'] = `t=${stripe[1]},v1=${h256(Buffer.concat([Buffer.from(`${stripe[1]}.`), Buffer.from(rawBody)]), 'hex')}`
       for (const [form, expected] of Object.entries(forms)) {
         if (safeEq(value, expected)) out.push({ header: name, secretIndex: i, encoding: form, ok: true, wacrmCompatible: name.toLowerCase() === WACRM_SCHEME.header && form === WACRM_SCHEME.encoding })
       }

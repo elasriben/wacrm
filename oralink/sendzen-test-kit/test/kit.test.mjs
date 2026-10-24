@@ -72,7 +72,7 @@ test('send-test.mjs is a dry run by default and refuses --send without allow-lis
 
 test('replay refuses remote targets by default and never sends in dry-run', async () => {
   const r = await run('replay-to-wacrm.mjs', ['x.jsonl', '--url', 'https://crm.example.com/api/whatsapp/webhook'])
-  assert.equal(r.code, 3); assert.match(r.err, /not local\/private/)
+  assert.equal(r.code, 3); assert.match(r.err, /not an allowed local\/private/)
 })
 
 test('signature schemes: every plausible encoding is identified, and only one is waCRM-compatible', () => {
