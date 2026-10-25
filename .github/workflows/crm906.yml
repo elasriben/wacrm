@@ -1,0 +1,101 @@
+name: CRM 906
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [codex/crm906-consent-hardening]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crm906-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  safety:
+    name: CRM 906 / safety
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Git, protected files, sensitive paths and syntax
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 oralink/crm/tests/check-crm906-pr.py
+      - name: Negative witnesses for CI gates
+        run: python3 oralink/crm/tests/test-check-crm906-pr.py
+      - name: Summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          printf '### CRM 906 / safety\nResult: %s\n' "$JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
+
+  postgres:
+    name: CRM 906 / postgres
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Disposable PostgreSQL and complete 906 counter-tests
+        env:
+          RESULTS: ${{ runner.temp }}/crm906-results.json
+        run: |
+          python3 oralink/crm/tests/run-consent-order-906.py --output "$RESULTS"
+          python3 oralink/crm/tests/check-crm906-pr.py --results "$RESULTS"
+      - name: Summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          printf '### CRM 906 / postgres\nResult: %s\n' "$JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Expected: all 58 named scenarios; full CRM suites; SQL error mutations rejected.\n' >> "$GITHUB_STEP_SUMMARY"
+
+  app:
+    name: CRM 906 / app
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: https://ci.example.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-dummy-anon-key
+      ENCRYPTION_KEY: '0000000000000000000000000000000000000000000000000000000000000000'
+      META_APP_SECRET: ci-dummy-meta-secret
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies without install hooks
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: TypeScript
+        run: npx --no-install tsc --noEmit --incremental false
+      - name: Focused ESLint
+        run: >-
+          npx --no-install eslint
+          src/lib/oralink/opt-keyword.ts src/lib/oralink/opt-keyword.test.ts
+          src/app/api/whatsapp/webhook/route.ts src/app/api/whatsapp/webhook/route.test.ts
+          src/lib/auth/redeem-invitation-migration.test.ts
+      - name: Focused application tests
+        run: >-
+          npx --no-install vitest run
+          src/lib/oralink/opt-keyword.test.ts
+          src/app/api/whatsapp/webhook/route.test.ts
+          src/lib/auth/redeem-invitation-migration.test.ts
+      - name: Summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          printf '### CRM 906 / app\nResult: %s\n' "$JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
