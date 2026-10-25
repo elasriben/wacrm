@@ -39,7 +39,7 @@ export function parseAppSecrets(raw: string | undefined): string[] {
     .filter((s) => s.length > 0)
 }
 
-function signatureMatches(rawBody: string, signatureHeader: string, secret: string): boolean {
+function signatureMatches(rawBody: Buffer | string, signatureHeader: string, secret: string): boolean {
   const expected =
     'sha256=' +
     crypto.createHmac('sha256', secret).update(rawBody).digest('hex')
@@ -52,7 +52,10 @@ function signatureMatches(rawBody: string, signatureHeader: string, secret: stri
 }
 
 export function verifyMetaWebhookSignature(
-  rawBody: string,
+  // Pass the exact request bytes (Buffer). A string is still accepted for
+  // callers and tests that hold one; it is HMACed as its UTF-8 encoding,
+  // which equals the received bytes only when they were valid UTF-8.
+  rawBody: Buffer | string,
   signatureHeader: string | null,
 ): boolean {
   const secrets = parseAppSecrets(process.env.META_APP_SECRET)

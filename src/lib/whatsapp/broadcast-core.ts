@@ -28,6 +28,10 @@ import {
 import { resolveTemplateRow } from '@/lib/whatsapp/template-body';
 import type { MessageTemplate } from '@/types';
 import { findOrCreateContact } from '@/lib/api/v1/contacts';
+import {
+  BROADCAST_OPT_OUT_ERROR,
+  blockedBroadcastRecipientRows,
+} from '@/lib/oralink/broadcast-guard';
 
 /** Thrown by createBroadcast on a caller-visible failure; route maps it. */
 export class BroadcastError extends Error {
@@ -262,7 +266,33 @@ export async function deliverBroadcast(
   db: SupabaseClient,
   plan: BroadcastPlan
 ): Promise<void> {
+  // OraLink consent guard (CONTRACTS §5), once per pass. A lookup failure
+  // fails CLOSED: every planned recipient is marked failed, none is sent.
+  let blockedRows: Set<string>;
+  let guardError: string | null = null;
+  try {
+    blockedRows = await blockedBroadcastRecipientRows(
+      db,
+      plan.broadcastId,
+      plan.planned.map((r) => r.recipientRowId)
+    );
+  } catch (err) {
+    console.error('[broadcast] consent guard failed — sending nothing:', err);
+    blockedRows = new Set(plan.planned.map((r) => r.recipientRowId));
+    guardError = 'Blocked: consent check failed';
+  }
+
   for (const recipient of plan.planned) {
+    if (blockedRows.has(recipient.recipientRowId)) {
+      await db
+        .from('broadcast_recipients')
+        .update({
+          status: 'failed',
+          error_message: guardError ?? BROADCAST_OPT_OUT_ERROR,
+        })
+        .eq('id', recipient.recipientRowId);
+      continue;
+    }
     const variants = phoneVariants(recipient.phone);
     let sentMessageId: string | null = null;
     let lastError: string | null = null;
