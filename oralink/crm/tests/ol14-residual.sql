@@ -6,7 +6,7 @@
 --
 -- Autonome : utilisateurs 9a…/9b…/9c…, téléphones +155555504xx, tout est fictif (@test.local).
 -- Base JETABLE uniquement (voir run-ol14-residual.sh). Sortie : « PASS | … » / « FAIL | … » puis « SUMMARY pass=<n> fail=<n> ».
-\set ON_ERROR_STOP off
+\set ON_ERROR_STOP on
 SET client_min_messages = warning;
 CREATE TEMP TABLE r14(test text, ok boolean, info text);
 GRANT ALL ON r14 TO PUBLIC;
@@ -135,7 +135,7 @@ DO $$ DECLARE r uuid; BEGIN
  CREATE TEMP TABLE account_invitations (LIKE public.account_invitations INCLUDING DEFAULTS);
  INSERT INTO pg_temp.account_invitations(account_id,role,token_hash,expires_at) SELECT accG,'owner','ol14-forged',now()+interval '1 day' FROM k14;
  BEGIN r := public.redeem_invitation('ol14-forged'); INSERT INTO r14 VALUES ('B: forged pg_temp.account_invitations is ignored', false, 'joined '||r);
- EXCEPTION WHEN OTHERS THEN INSERT INTO r14 VALUES ('B: forged pg_temp.account_invitations is ignored', SQLERRM='Invitation not found', SQLSTATE||' '||SQLERRM); END;
+ EXCEPTION WHEN OTHERS THEN INSERT INTO r14 VALUES ('B: forged pg_temp.account_invitations is ignored', SQLSTATE='22023' AND SQLERRM='Invitation not found', SQLSTATE||' '||SQLERRM); END;
  DROP TABLE pg_temp.account_invitations;
 END $$;
 RESET ROLE;
@@ -179,7 +179,13 @@ INSERT INTO r14 SELECT 'C: unique index on contact_consents(seq)', count(*)=1, s
  WHERE i.indrelid='public.contact_consents'::regclass AND i.indisunique AND i.indnkeyatts=1
    AND i.indkey[0]=(SELECT attnum FROM pg_attribute WHERE attrelid='public.contact_consents'::regclass AND attname='seq');
 INSERT INTO r14 SELECT 'C: no duplicate seq in contact_consents', count(*)=0, count(*)::text FROM (SELECT seq FROM public.contact_consents GROUP BY seq HAVING count(*)>1) d;
-INSERT INTO r14 SELECT 'C: contact_consent_current orders by seq only', v ~ 'ORDER BY .*purpose, seq DESC;?\s*$' AND v !~ 'ORDER BY .*recorded_at', substring(v from 'ORDER BY.*$')
+-- Keep this regression label stable for the 904 mutation harness. After 906,
+-- the protected decision_order supersedes seq; restoring either old view fails.
+INSERT INTO r14 SELECT 'C: contact_consent_current orders by seq only',
+ CASE WHEN EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='public.contact_consents'::regclass AND attname='decision_order' AND NOT attisdropped)
+   THEN v ~ 'ORDER BY .*purpose, decision_order DESC;?\s*$'
+   ELSE v ~ 'ORDER BY .*purpose, seq DESC;?\s*$' END
+ AND v !~ 'ORDER BY .*recorded_at', substring(v from 'ORDER BY.*$')
  FROM (SELECT pg_get_viewdef('public.contact_consent_current'::regclass) v) x;
 INSERT INTO r14 SELECT 'C: contact_consent_current is security_invoker', coalesce(bool_or(o='security_invoker=true'),false), '' FROM pg_class c, unnest(coalesce(c.reloptions,'{}')) o WHERE c.oid='public.contact_consent_current'::regclass;
 INSERT INTO r14 SELECT 'C: anon has no SELECT on contact_consent_current', NOT has_table_privilege('anon','public.contact_consent_current','SELECT'), '';
@@ -217,7 +223,7 @@ INSERT INTO r14 SELECT 'C: START after STOP in one batch -> granted (latest wins
 INSERT INTO r14 SELECT 'C: G sees no account-H row in contact_consent_current', count(*)=0, count(*)::text FROM public.contact_consent_current WHERE account_id=(SELECT accH FROM k14);
 DO $$ DECLARE k record; ok boolean; BEGIN SELECT * INTO k FROM k14;
  BEGIN INSERT INTO public.contact_consents(account_id,contact_id,purpose,status,source,recorded_by) VALUES (k.accH,k.ctH,'marketing','revoked','manual','9a000000-0000-0000-0000-000000000002'); ok:=false;
- EXCEPTION WHEN OTHERS THEN ok:=true; END;
+ EXCEPTION WHEN insufficient_privilege THEN ok:=true; END;
  INSERT INTO r14 VALUES ('C: agent G cannot record a STOP for an account-H contact', ok, '');
 END $$;
 RESET ROLE;
