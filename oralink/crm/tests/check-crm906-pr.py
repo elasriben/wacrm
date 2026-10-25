@@ -152,6 +152,10 @@ def check_safety(base):
     names = git("diff", "--no-renames", "--name-only", "-z", base, "HEAD", "--").split(b"\0")
     paths = [os.fsdecode(name) for name in names if name]
     validate_paths(paths)
+    # A file added then deleted is absent from the final diff but still published
+    # in Git history. Inspect every commit, including both sides of merges.
+    historical = git("log", "-m", "--format=", "--name-only", "-z", "--no-renames", base + "..HEAD", "--").split(b"\0")
+    validate_paths([os.fsdecode(name) for name in historical if name])
     for name, expected in IMMUTABLE.items():
         if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
             raise ValueError("Published migration changed: " + name)

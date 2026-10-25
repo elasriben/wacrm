@@ -18,6 +18,27 @@ def command(args, text=None, timeout=180):
     return subprocess.run(args, input=text, capture_output=True, text=True, timeout=timeout)
 
 
+
+def masked_error_sql(statement):
+    directive = "\\set ON_ERROR_STOP on"
+    if statement.count(directive) != 1:
+        raise RuntimeError('Masked-error mutation target missing or ambiguous')
+    mutated = statement.replace(directive, "\\set ON_ERROR_STOP off", 1)
+    if mutated == statement:
+        raise RuntimeError('Masked-error mutation did not change SQL')
+    return mutated
+
+
+def write_negative_sql(docker, statement):
+    path = '/tmp/negative/oralink/crm/tests/ol14-residual.sql'
+    write = docker('bash', '-c', 'cat > '+path, text=statement)
+    if write.returncode:
+        raise RuntimeError('Cannot write SQL error mutation: '+write.stderr)
+    readback = docker('cat', path)
+    if readback.returncode or readback.stdout != statement:
+        raise RuntimeError('SQL error mutation readback differs from requested content')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', default='/tmp/crm906-results.json')
@@ -217,16 +238,15 @@ def main():
         original=(ROOT/'oralink/crm/tests/ol14-residual.sql').read_text()
         altered=original.replace('DO $$ BEGIN','DO $$ BEGIN PERFORM 1/0;',1)
         if altered==original: raise RuntimeError('Mutation target missing')
-        change=docker('bash','-c','cat > /tmp/negative/oralink/crm/tests/ol14-residual.sql',text=altered)
-        if change.returncode: raise RuntimeError(change.stderr)
+        write_negative_sql(docker, altered)
         negative=docker('bash','-c','PGUSER=postgres PGHOST=/var/run/postgresql TEST_DB=crm906_negative_test bash /tmp/negative/oralink/crm/tests/run-isolation-cases.sh')
         results.append({'label':'real SQL division-by-zero makes runner red', 'ok':negative.returncode!=0 and ('division by zero' in negative.stderr or 'division by zero' in negative.stdout), 'actual':negative.returncode})
         evidence['negative_runner_exit']=negative.returncode
         # Even with error-stop switched off, omission/error must not look green.
-        altered=altered.replace('\\set ON_ERROR_STOP on','\\set ON_ERROR_STOP off')
-        docker('bash','-c','cat > /tmp/negative/oralink/crm/tests/ol14-residual.sql',text=altered)
+        altered=masked_error_sql(altered)
+        write_negative_sql(docker, altered)
         masked=docker('bash','-c','PGUSER=postgres PGHOST=/var/run/postgresql TEST_DB=crm906_masked_test bash /tmp/negative/oralink/crm/tests/run-isolation-cases.sh')
-        results.append({'label':'masked psql error cannot produce green runner', 'ok':masked.returncode!=0, 'actual':masked.returncode})
+        results.append({'label':'masked psql error cannot produce green runner', 'ok':masked.returncode==2 and ('division by zero' in masked.stderr or 'division by zero' in masked.stdout), 'actual':masked.returncode})
         evidence['masked_runner_exit']=masked.returncode
         must('ALTER SEQUENCE public.contact_consents_decision_order_seq INCREMENT BY -1 MINVALUE -9223372036854775807;')
         drift=migration(906)
