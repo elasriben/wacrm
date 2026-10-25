@@ -41,11 +41,20 @@ PGOPTIONS='-c client_min_messages=warning' psql -X -At -F ' | ' -d "$TEST_DB" -f
 { grep -E '^(PASS|FAIL) \|' "$IAM" || true; } | sort | sed 's/^/  /'
 IAM_SUMMARY="$(grep -E '^SUMMARY' "$IAM" || true)"
 
+echo "== Correctifs résiduels OL-14 (ol14-residual.sql, migration 904)"
+OL14="$(mktemp)"
+PGOPTIONS='-c client_min_messages=warning' psql -X -At -F ' | ' -d "$TEST_DB" -f "$HERE/ol14-residual.sql" >"$OL14" 2>"$OL14.err" || true
+{ grep -E '^(PASS|FAIL) \|' "$OL14" || true; } | sort | sed 's/^/  /'
+OL14_SUMMARY="$(grep -E '^SUMMARY' "$OL14" || true)"
+
 psql -d postgres -qc "DROP DATABASE IF EXISTS \"$TEST_DB\"" || true
 [ -z "$SUMMARY" ] && { echo "Aucun résumé :"; head -20 "$OUT.err"; exit 2; }
 [ "$IAM_RC" -eq 0 ] && [ -n "$IAM_SUMMARY" ] || { echo "is-account-member.sql en erreur (code $IAM_RC) :"; head -20 "$IAM.err"; exit 2; }
+[ -n "$OL14_SUMMARY" ] || { echo "ol14-residual.sql sans résumé :"; head -20 "$OL14.err"; exit 2; }
 echo "== ORALINK $SUMMARY"
 echo "== IS_ACCOUNT_MEMBER $IAM_SUMMARY"
+echo "== OL14_RESIDUAL $OL14_SUMMARY"
 grep -q ' fail=0$' <<<"$SUMMARY" || rc=1
 grep -q ' fail=0$' <<<"$IAM_SUMMARY" || rc=1
+grep -q ' fail=0$' <<<"$OL14_SUMMARY" || rc=1
 exit "$rc"
