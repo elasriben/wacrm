@@ -70,6 +70,8 @@ EXPECTED_LABELS = (
     'concurrent STOP preserved after migration replay',
     'service cannot rewrite decision_order',
     'inherited sequence UPDATE aborts corrective migration',
+    'SET-only membership sequence UPDATE aborts corrective migration',
+    'transitive NOINHERIT chain sequence UPDATE aborts corrective migration',
     'new order sequence nextval is private',
     'setval is not a public RPC function',
     'concurrent STOP inserted after opt-in wins despite earlier BEGIN',
@@ -77,6 +79,14 @@ EXPECTED_LABELS = (
     'real SQL division-by-zero makes runner red',
     'masked psql error cannot produce green runner',
     'decision sequence configuration drift fails closed',
+    'first migration reports automatic revocation counts',
+    'replay reports no automatic revocation',
+    'authenticated/1/nextval denied/contact_consents_seq_seq',
+    'authenticated/2/nextval denied/contact_consents_seq_seq',
+    'authenticated/3/nextval denied/contact_consents_seq_seq',
+    'authenticated/4/nextval denied/contact_consents_seq_seq',
+    'anon/-/nextval denied/contact_consents_seq_seq',
+    'service_role/-/nextval denied/contact_consents_seq_seq',
 )
 EXPECTED_SUMMARIES = {
     "== SUMMARY pass=80 fail=0", "== ORALINK SUMMARY pass=49 fail=0",

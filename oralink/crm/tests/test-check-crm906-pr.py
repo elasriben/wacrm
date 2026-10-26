@@ -37,7 +37,7 @@ class SafetyTests(unittest.TestCase):
         guard.validate_paths([".env.example", "docs/oralink/crm/906.md", "supabase/migrations/906_oralink_consent_order_hardening.sql"])
 
     def test_complete_evidence_accepted(self):
-        self.assertEqual(guard.validate_results(complete_evidence()), 58)
+        self.assertEqual(guard.validate_results(complete_evidence()), 68)
 
     def test_missing_critical_case_cannot_be_replaced_by_fake_pass(self):
         data = complete_evidence()

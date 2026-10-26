@@ -20,8 +20,12 @@ DECLARE
   v_max bigint;
   v_sequence_max bigint;
   v_count bigint;
+  v_revoked_vs_900 bigint;
+  v_revoked_vs_904 bigint;
   v_attnum smallint;
   v_role text;
+  v_reach text;
+  v_via text;
 BEGIN
   LOCK TABLE public.contact_consents IN ACCESS EXCLUSIVE MODE;
   SELECT relowner INTO v_table_owner FROM pg_class
@@ -83,6 +87,26 @@ BEGIN
     -- Only the new technical column is populated. All recorded events, original
     -- seq, evidence, dates and identities stay unchanged. The exclusive lock and
     -- atomic statement prevent access while this single trigger is disabled.
+    -- Counts only (no identifiers): pairs the backfill turns to revoked although
+    -- the pre-904 order (recorded_at) or the 904 order (seq) showed granted.
+    -- Same winners as the backfill below. Reported once the migration succeeds.
+    WITH timestamp_winner AS (
+      SELECT DISTINCT ON (account_id, contact_id, channel, purpose)
+        account_id, contact_id, channel, purpose, status
+      FROM public.contact_consents
+      ORDER BY account_id, contact_id, channel, purpose, recorded_at DESC, seq DESC, id DESC
+    ), sequence_winner AS (
+      SELECT DISTINCT ON (account_id, contact_id, channel, purpose)
+        account_id, contact_id, channel, purpose, status
+      FROM public.contact_consents
+      ORDER BY account_id, contact_id, channel, purpose, seq DESC, id DESC
+    )
+    SELECT count(*) FILTER (WHERE t.status = 'granted' AND s.status = 'revoked'),
+           count(*) FILTER (WHERE s.status = 'granted' AND t.status = 'revoked')
+      INTO v_revoked_vs_900, v_revoked_vs_904
+      FROM timestamp_winner t JOIN sequence_winner s
+        USING (account_id, contact_id, channel, purpose);
+
     ALTER TABLE public.contact_consents DISABLE TRIGGER oralink_consent_guard;
     WITH timestamp_winner AS (
       SELECT DISTINCT ON (account_id, contact_id, channel, purpose)
@@ -151,16 +175,26 @@ BEGIN
   END IF;
 
   -- Clear default grants (including those inherited from bootstrap defaults).
-  -- The identity default needs USAGE before the SECURITY DEFINER guard fires.
-  -- The new order has no caller-evaluated default, so it needs no runtime grant.
+  -- No runtime grant is needed: the identity default does not check sequence
+  -- privileges, the SECURITY DEFINER guard allocates both values, and the new
+  -- order has no caller-evaluated default.
   EXECUTE format('REVOKE ALL ON SEQUENCE %s FROM PUBLIC, anon, authenticated, service_role', v_old_sequence);
-  EXECUTE format('GRANT USAGE ON SEQUENCE %s TO authenticated, service_role', v_old_sequence);
   REVOKE ALL ON SEQUENCE public.contact_consents_decision_order_seq
     FROM PUBLIC, anon, authenticated, service_role;
-  FOREACH v_role IN ARRAY ARRAY['anon', 'authenticated', 'service_role'] LOOP
-    IF has_sequence_privilege(v_role, v_old_sequence, 'UPDATE')
-       OR has_sequence_privilege(v_role, v_new_sequence, 'UPDATE') THEN
-      RAISE EXCEPTION '906: inherited sequence UPDATE privilege for %; review role grants', v_role
+  -- Not only inherited privileges: any role an application role (or the
+  -- PostgREST login role) can switch to with SET ROLE, directly or through a
+  -- chain, counts. PostgreSQL 16+ tracks the SET option per grant; before 16
+  -- every membership allows SET ROLE, so MEMBER is the exact test there.
+  v_reach := CASE WHEN current_setting('server_version_num')::int >= 160000 THEN 'SET' ELSE 'MEMBER' END;
+  FOREACH v_role IN ARRAY ARRAY['anon', 'authenticated', 'service_role', 'authenticator'] LOOP
+    CONTINUE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role);
+    SELECT string_agg(t.rolname, ', ' ORDER BY t.rolname) INTO v_via
+      FROM pg_roles t
+      WHERE pg_has_role(v_role, t.oid, v_reach)
+        AND (has_sequence_privilege(t.oid, v_old_sequence, 'UPDATE')
+             OR has_sequence_privilege(t.oid, v_new_sequence, 'UPDATE'));
+    IF v_via IS NOT NULL THEN
+      RAISE EXCEPTION '906: sequence UPDATE privilege reachable from % (via %); review role grants', v_role, v_via
         USING ERRCODE = '42501';
     END IF;
   END LOOP;
@@ -220,5 +254,10 @@ BEGIN
     FROM public.contact_consents
     ORDER BY account_id, contact_id, channel, purpose, decision_order DESC
   $view$;
+
+  IF v_first THEN
+    RAISE NOTICE '906: % consent pair(s) revoked versus the pre-904 order, % versus the 904 order',
+      v_revoked_vs_900, v_revoked_vs_904;
+  END IF;
 END;
 $migration$;

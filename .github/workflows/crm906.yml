@@ -58,7 +58,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           printf '### CRM 906 / postgres\nResult: %s\n' "$JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
-          printf 'Expected: all 58 named scenarios; full CRM suites; SQL error mutations rejected.\n' >> "$GITHUB_STEP_SUMMARY"
+          printf 'Expected: all 68 named scenarios; full CRM suites; SQL error mutations rejected.\n' >> "$GITHUB_STEP_SUMMARY"
 
   app:
     name: CRM 906 / app

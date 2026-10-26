@@ -69,11 +69,13 @@ def main():
                         'actual': r.stderr.strip() if r.returncode else r.stdout.strip()})
         print(('PASS' if ok else 'FAIL') + ' | ' + label, flush=True)
 
-    def migration(number, database=DB):
+    def migration(number, database=DB, messages=False):
         files = list((ROOT/'supabase/migrations').glob(str(number)+'_*.sql'))
         if len(files) != 1:
             raise RuntimeError('Migration not unique: '+str(number))
-        return sql('\\i /repo/supabase/migrations/'+files[0].name, database=database)
+        # messages=True: full NOTICE text (VERBOSITY=sqlstate prints only the code).
+        verbosity = '\\set VERBOSITY default\n' if messages else ''
+        return sql(verbosity+'\\i /repo/supabase/migrations/'+files[0].name, database=database)
 
     def apply(number, database=DB):
         r = migration(number, database)
@@ -154,7 +156,11 @@ def main():
             if variant == 'inherited':
                 must('REVOKE crm906_parent FROM authenticated; DROP OWNED BY crm906_parent; DROP ROLE crm906_parent;', database=db)
             must(f'DROP DATABASE {db};', database='postgres')
-        apply(906)
+        first = migration(906, messages=True)
+        if first.returncode:
+            raise RuntimeError(first.stderr)
+        # Counts only: C3 (high-seq STOP, later START) vs pre-904; C1 (high-seq grant, later STOP) vs 904.
+        results.append({'label': 'first migration reports automatic revocation counts', 'ok': '906: 1 consent pair(s) revoked versus the pre-904 order, 1 versus the 904 order' in first.stderr, 'actual': first.stderr.strip()})
         check('906 restores legacy revoked decision', state(1), 'revoked')
         check('906 preserves current revoked on ambiguous historical START', state(3), 'revoked')
         check('906 preserves granted when both old orders agree', state(4), 'granted')
@@ -165,7 +171,10 @@ def main():
         must(consent(1,'granted'), role='authenticated', uid=OWNER)
         check('new explicit START may grant', state(1), 'granted')
         must('CREATE TABLE public.audit906_order AS SELECT id,decision_order FROM public.contact_consents;')
-        apply(906)
+        replay = migration(906, messages=True)
+        if replay.returncode:
+            raise RuntimeError(replay.stderr)
+        results.append({'label': 'replay reports no automatic revocation', 'ok': '906:' not in replay.stderr, 'actual': replay.stderr.strip()})
         check('idempotence does not undo later START', state(1), 'granted')
         check('idempotence preserves every allocated order', 'SELECT bool_and(c.decision_order=o.decision_order) FROM public.contact_consents c JOIN public.audit906_order o USING(id);', 't', role=None)
         check('old sequence avoids historical collisions', "SELECT max(seq)>3000000000 FROM public.contact_consents WHERE contact_id='"+contact(1)+"';", 't')
@@ -173,6 +182,8 @@ def main():
             label = role + '/' + (uid[-1] if uid else '-')
             for sequence in ['contact_consents_seq_seq','contact_consents_decision_order_seq']:
                 check(label+'/setval denied/'+sequence, f"SELECT setval('public.{sequence}',1,true);", '', role=role, uid=uid, code='42501')
+            # The identity default needs no sequence privilege: application roles cannot draw values directly.
+            check(label+'/nextval denied/contact_consents_seq_seq', "SELECT nextval('public.contact_consents_seq_seq');", '', role=role, uid=uid, code='42501')
             if role=='authenticated' and uid != 'e9060000-0000-0000-0000-000000000004':
                 check(label+'/legitimate consent INSERT', consent(6,'revoked')+'SELECT 1;', '1', role=role, uid=uid)
         check('viewer INSERT denied', consent(6,'revoked'), '', uid='e9060000-0000-0000-0000-000000000004', code='42501')
@@ -212,6 +223,25 @@ def main():
         failed=migration(906)
         results.append({'label':'inherited sequence UPDATE aborts corrective migration', 'ok':failed.returncode!=0 and '42501' in failed.stderr, 'actual':failed.stderr.strip()})
         must('REVOKE crm906_sequence_parent FROM authenticated; DROP OWNED BY crm906_sequence_parent; DROP ROLE crm906_sequence_parent;')
+        # SET ROLE paths (CRM 907, risk C): no inherited privilege, but reachable with SET ROLE.
+        # PostgreSQL 16+ grants membership WITH INHERIT FALSE, SET TRUE; before 16 the
+        # equivalent is a NOINHERIT member role (that syntax does not exist on 15).
+        modern = int(must('SHOW server_version_num;', database='postgres')) >= 160000
+        set_only_grant = ('GRANT crm906_set_only TO authenticated WITH INHERIT FALSE, SET TRUE;' if modern
+                          else 'ALTER ROLE authenticated NOINHERIT; GRANT crm906_set_only TO authenticated;')
+        set_only_undo = 'REVOKE crm906_set_only FROM authenticated;' + ('' if modern else ' ALTER ROLE authenticated INHERIT;')
+        for label, setup, cleanup in [
+            ('SET-only membership sequence UPDATE aborts corrective migration',
+             'CREATE ROLE crm906_set_only; GRANT UPDATE ON SEQUENCE public.contact_consents_seq_seq TO crm906_set_only; ' + set_only_grant,
+             set_only_undo + ' DROP OWNED BY crm906_set_only; DROP ROLE crm906_set_only;'),
+            ('transitive NOINHERIT chain sequence UPDATE aborts corrective migration',
+             'CREATE ROLE crm906_top; CREATE ROLE crm906_mid NOINHERIT; GRANT UPDATE ON SEQUENCE public.contact_consents_decision_order_seq TO crm906_top; GRANT crm906_top TO crm906_mid; GRANT crm906_mid TO authenticated;',
+             'REVOKE crm906_mid FROM authenticated; REVOKE crm906_top FROM crm906_mid; DROP OWNED BY crm906_top; DROP ROLE crm906_mid; DROP ROLE crm906_top;'),
+        ]:
+            must(setup)
+            failed=migration(906)
+            results.append({'label':label, 'ok':failed.returncode!=0 and '42501' in failed.stderr, 'actual':failed.stderr.strip()})
+            must(cleanup)
         apply(906)
         check('new order sequence nextval is private', "SELECT nextval('public.contact_consents_decision_order_seq');", '', code='42501')
         check('setval is not a public RPC function', "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname='setval';", '0')
