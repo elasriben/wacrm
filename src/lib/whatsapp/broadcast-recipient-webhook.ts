@@ -28,8 +28,13 @@ function failureMessage(failure: RecipientStatusFailure): string {
 
 export async function applyBroadcastRecipientStatus(
   db: SupabaseClient,
+  // Account resolved from the receiving number (metadata.phone_number_id).
+  // Required: a status must never move a recipient row of another
+  // account, even if it carries the same wamid. Empty → skipped, no query.
+  accountId: string,
   event: RecipientStatusEvent
 ): Promise<RecipientStatusOutcome> {
+  if (!accountId) return 'skipped';
   if (!isRecipientStatus(event.status)) return 'skipped';
   const predecessors = allowedPredecessors(event.status);
   if (predecessors.length === 0) return 'skipped';
@@ -40,10 +45,29 @@ export async function applyBroadcastRecipientStatus(
   if (event.status === 'read') update.read_at = event.occurredAt;
   if (event.failure) update.error_message = failureMessage(event.failure);
 
+  // 1) Bounded read: rows of THIS account's broadcasts only (inner join on
+  //    broadcasts.account_id), same pattern as flagBroadcastReply below.
+  const { data: rows, error: selectError } = await db
+    .from('broadcast_recipients')
+    .select('id, broadcasts!inner(account_id)')
+    .eq('whatsapp_message_id', event.whatsappMessageId)
+    .eq('broadcasts.account_id', accountId)
+    .in('status', predecessors);
+
+  if (selectError) {
+    console.error('Error fetching broadcast recipients for status:', selectError);
+    return 'error';
+  }
+  const ids = ((rows ?? []) as { id: string }[]).map((r) => r.id);
+  if (ids.length === 0) return 'skipped';
+
+  // 2) Update by id, re-checking the predecessor statuses so a concurrent
+  //    webhook that advanced a row between the read and the write is not
+  //    overwritten.
   const { data, error } = await db
     .from('broadcast_recipients')
     .update(update)
-    .eq('whatsapp_message_id', event.whatsappMessageId)
+    .in('id', ids)
     .in('status', predecessors)
     .select('id');
 

@@ -259,12 +259,13 @@ describe('POST signature: accepted with multi-value META_APP_SECRET', () => {
   })
 
   it('invalid UTF-8 bytes signed over the raw bytes are rejected (fails closed: false reject, never an acceptance)', async () => {
-    // readCappedBody decodes to a string (U+FFFD replacement) before the HMAC,
-    // so the HMAC is not over the exact bytes received. Effect: a false reject,
-    // never an acceptance. Meta always sends valid UTF-8 JSON.
+    // Since fix C (OL-12) the HMAC is computed over the exact bytes received, so
+    // this signature is valid; the body is then decoded as strict UTF-8 and the
+    // request is refused with 400 before any processing. Never an acceptance.
+    // (Before fix C the body was decoded first, so the same request got a 401.)
     const raw = Buffer.concat([Buffer.from('{"entry":[],"x":"'), Buffer.from([0xff, 0xfe]), Buffer.from('"}')])
     const res = await POST(post(raw, sign(raw, SECRET_A)))
-    expect(res.status).toBe(401)
+    expect(res.status).toBe(400)
     expectNothingHappened()
   })
 })

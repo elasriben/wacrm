@@ -53,12 +53,12 @@ describe("redeem_invitation migration", () => {
   it("checks every account-scoped table for data before deleting the old account", () => {
     const missing = [...accountScopedTables()]
       .filter((table) => !tablesWithoutDomainData.has(table))
-      .filter((table) => !new RegExp(`from\\s+${table}\\s+where\\s+account_id\\s*=\\s*v_old_account_id`, "i").test(body));
+      .filter((table) => !new RegExp(`from\\s+(?:public\\.)?${table}\\s+where\\s+account_id\\s*=\\s*v_old_account_id`, "i").test(body));
     expect(missing).toEqual([]);
   });
 
   it("refuses when the old account has other members", () => {
-    expect(body).toMatch(/from\s+profiles\s+where\s+account_id\s*=\s*v_old_account_id\s+and\s+user_id\s*<>\s*v_caller_id/i);
+    expect(body).toMatch(/from\s+(?:public\.)?profiles\s+where\s+account_id\s*=\s*v_old_account_id\s+and\s+user_id\s*<>\s*v_caller_id/i);
   });
 });
 
